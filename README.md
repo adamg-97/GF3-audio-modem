@@ -2,6 +2,6 @@
 
 The Dangerous 5G's
 
-Harriet Crisp
-Hugo Sonnery
-Adam Goldney
+Harriet Crisp\n
+Hugo Sonnery\n
+Adam Goldney\n
