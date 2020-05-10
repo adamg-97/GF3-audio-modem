@@ -48,7 +48,7 @@ class CamG:
         self.bits_per_symbol = len(self.data_carriers) * self.mu            # Bits per OFDM symbol = number of carriers x modulation index
 
 
-    # Shapes serial bits into parallel stream for OFDM
+    # Shapes serial bits into parallel stream for OFDM -- needs adjusting for multiple OFDM symbols
     def SP(self, bits):
         return bits.reshape(len(self.data_carriers), self.mu)
         
@@ -57,7 +57,7 @@ class CamG:
         return bits.reshape((-1,))
     
     
-    # Maps the bits to symbols
+    # Maps the bits to symbols -- needs adjusting for multiple OFDM symbols
     def map(self, bits):
         if(type(bits) != np.ndarray): raise ValueError("Bits must be numpy array")
         return np.array([self.mapping_table[tuple(b)] for b in bits])
@@ -82,7 +82,7 @@ class CamG:
         return np.array([np.vstack([demapping_table[C] for C in hardDecision[i,:]]) for i in range(hardDecision.shape[0]) ]), hardDecision
     
     
-    # Allocates symbols and pilots to OFDM symbol
+    # Allocates symbols and pilots to OFDM symbol -- needs adjusting for multiple OFDM symbols
     def OFDM_symbol(self, payload):
         symbol = np.zeros(self.K, dtype=complex) # overall K subcarriers
         try: symbol[self.pilot_carriers] = self.pilot_value     # Allocate pilot subcarriers
@@ -91,7 +91,7 @@ class CamG:
         return symbol
     
     
-    # Add the cyclic prefix
+    # Add the cyclic prefix -- needs adjusting for multiple OFDM symbols
     def add_cp(self, time_data):
         cyclic_prefix = time_data[-self.cp:]            # take the last cp samples
         return np.hstack([cyclic_prefix, time_data])    # add them to the beginning
@@ -107,8 +107,8 @@ class CamG:
         # Not yet implemented
         return
         
-        
-    def get_data(self, equalised):
+    # Extract data carriers from all carriers -- needs adjusting for multiple OFDM symbols
+    def get_data(self, equalised): 
         return equalised[self.data_carriers]
     
     
