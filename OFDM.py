@@ -4,6 +4,7 @@
 import numpy as np
 import scipy as sp
 import matplotlib.pyplot as plt
+import pandas as pd
 
 class CamG:
     def __init__(self, K, cp, modulation, P=0):
@@ -25,9 +26,9 @@ class CamG:
         if(self.modulation == "QPSK"):
             self.mapping_table = {      # Mapping table
                 (0,0) : (1+1j)/np.sqrt(2),
-                (0,1) : (1-1j)/np.sqrt(2),
+                (1,0) : (1-1j)/np.sqrt(2),
                 (1,1) : (-1-1j)/np.sqrt(2),
-                (1,0) : (-1+1j)/np.sqrt(2),
+                (0,1) : (-1+1j)/np.sqrt(2),
             }
             self.mu = 2     # Bits per symbol
         
@@ -71,14 +72,14 @@ class CamG:
         constellation = np.array([x for x in demapping_table.keys()])
         
         # Calulate distance of each received symbol to each point in the constellation
-        dists = abs(symbols.reshape((-1,1)) - constellation.reshape((1,-1)))
-        
+        dists = np.array([abs(y.reshape((-1,1)) - constellation.reshape((1,-1))) for y in symbols])
+
         # For each received symbol choose the nearest constellation point
-        const_index = dists.argmin(axis=1)
+        const_index = dists.argmin(axis=2)
         hardDecision = constellation[const_index]
         
         # Transform constellation points into bit groups
-        return np.vstack([demapping_table[C] for C in hardDecision]), hardDecision
+        return np.array([np.vstack([demapping_table[C] for C in hardDecision[i,:]]) for i in range(hardDecision.shape[0]) ]), hardDecision
     
     
     # Allocates symbols and pilots to OFDM symbol
@@ -98,7 +99,7 @@ class CamG:
     
     # Remove the cyclic prefix
     def remove_cp(self, signal):
-        return signal[self.cp:(self.cp+self.K)]         # Only taking indicies of the data we want
+        return np.array([signal[i,self.cp:(self.cp+self.K)] for i in range(signal.shape[0])])         # Only taking indicies of the data we want
     
     
     # Calculate channel estimate from pilot carriers
@@ -121,16 +122,16 @@ class CamG:
 
 # IFFT
 def IFFT(data):
-    return np.fft.ifft(data)
+    return np.array([np.fft.ifft(data[i,:]) for i in range(data.shape[0])])
 
 
 # FFT
 def FFT(data):
-    return np.fft.fft(data)
+    return np.array([np.fft.fft(data[i,:]) for i in range(data.shape[0])])
     
 # Equalise the received OFDM signal using the estimated channel coefficients
 def equalise(data, h_est):
-    return data / h_est
+    return np.array([data[i,:] / h_est for i in range(data.shape[0])])
         
         
  
