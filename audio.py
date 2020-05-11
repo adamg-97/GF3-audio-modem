@@ -6,24 +6,19 @@ import sys
 
 
 def play_audio(filename):
-    # Set chunk size of 1024 samples per data frame
-    chunk = 1024  
+    chunk = 1024   # Set chunk size of 1024 samples per data frame
 
-    # Open the sound file 
-    wf = wave.open(filename, 'rb')
+    wf = wave.open(filename, 'rb')   # Open the sound file 
 
-    # Create an interface to PortAudio
-    p = pyaudio.PyAudio()
+    p = pyaudio.PyAudio()   # Create an interface to PortAudio
 
     # Open a .Stream object to write the WAV file to
-    # 'output = True' indicates that the sound will be played rather than recorded
     stream = p.open(format = p.get_format_from_width(wf.getsampwidth()),
                     channels = wf.getnchannels(),
                     rate = wf.getframerate(),
                     output = True)
 
-    # Read data in chunks
-    data = wf.readframes(chunk)
+    data = wf.readframes(chunk)    # Read data in chunks
 
     # Play the sound by writing the audio data to the stream
     while data != '':
@@ -37,13 +32,13 @@ def play_audio(filename):
 
 
 def record_audio(filename):
-    chunk = 1024  # Record in chunks of 1024 samples
+    chunk = 1024 
     sample_format = pyaudio.paInt16  # 16 bits per sample
     channels = 1
     fs = 44100  # Record at 44100 samples per second
     seconds = 3
 
-    p = pyaudio.PyAudio()  # Create an interface to PortAudio
+    p = pyaudio.PyAudio()
 
     print('Recording')
 
@@ -60,9 +55,9 @@ def record_audio(filename):
         data = stream.read(chunk)
         frames.append(data)
 
-    # Stop and close the stream 
     stream.stop_stream()
     stream.close()
+
     # Terminate the PortAudio interface
     p.terminate()
 
@@ -76,6 +71,8 @@ def record_audio(filename):
     wf.writeframes(b''.join(frames))
     wf.close()
 
+
+
 def plot_audio(filename):
 
     spf = wave.open(filename, "r")
@@ -88,6 +85,8 @@ def plot_audio(filename):
     plt.title("Audio Signal")
     plt.plot(signal)
     plt.show()
+
+
 
 record_audio('recorded.wav')
 play_audio('recorded.wav')
