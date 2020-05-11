@@ -80,10 +80,14 @@ def plot_audio(filename):
     # Extract Raw Audio from Wav File
     signal = spf.readframes(-1)
     signal = np.fromstring(signal, "Int16")
+    fs = spf.getframerate()
+
+    time = np.linspace(0, len(signal) / fs, num=len(signal))
 
     plt.figure(1)
     plt.title("Audio Signal")
-    plt.plot(signal)
+    plt.xlabel('Time, s')
+    plt.plot(time, signal)
     plt.show()
 
 
