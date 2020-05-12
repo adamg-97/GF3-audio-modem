@@ -3,6 +3,9 @@ import wave
 import matplotlib.pyplot as plt
 import numpy as np
 import sys
+import scipy.io.wavfile
+from scipy.signal import chirp, spectrogram, convolve
+from IPython.display import Audio
 
 
 def play_audio(filename):
@@ -21,7 +24,7 @@ def play_audio(filename):
     data = wf.readframes(chunk)    # Read data in chunks
 
     # Play the sound by writing the audio data to the stream
-    while data != '':
+    while len(data) > 0:
         stream.write(data)
         data = wf.readframes(chunk)
 
@@ -31,12 +34,12 @@ def play_audio(filename):
 
 
 
-def record_audio(filename):
+def record_audio(filename, time, fs):
     chunk = 1024 
     sample_format = pyaudio.paInt16  # 16 bits per sample
     channels = 1
-    fs = 44100  # Record at 44100 samples per second
-    seconds = 3
+    fs = fs  # Record at fs samples per second
+    seconds = time
 
     p = pyaudio.PyAudio()
 
@@ -89,9 +92,30 @@ def plot_audio(filename):
     plt.xlabel('Time, s')
     plt.plot(time, signal)
     plt.show()
+    
+    return
+
+def get_audio(filename):
+    spf = wave.open(filename, "r")
+
+    # Extract Raw Audio from Wav File
+    signal = spf.readframes(-1)
+    signal = np.fromstring(signal, "Int16")
+    fs = spf.getframerate()
+    
+    return signal, fs
+
+def get_peaks(signal, thresh):
+    peaks = []
+    
+    for i in range(len(signal)):
+        if(abs(signal[i]) > thresh): peaks.append([signal[i], i])
+        
+    return(peaks)
+
+#record_audio('recorded.wav')
+#play_audio('recorded.wav')
+#plot_audio('recorded.wav')
 
 
 
-record_audio('recorded.wav')
-play_audio('recorded.wav')
-plot_audio('recorded.wav')
