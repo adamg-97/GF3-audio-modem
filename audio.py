@@ -75,8 +75,6 @@ def record_audio(filename, time, fs):
     wf.writeframes(b''.join(frames))
     wf.close()
 
-
-
 def plot_audio(filename):
 
     spf = wave.open(filename, "r")
@@ -88,12 +86,21 @@ def plot_audio(filename):
 
     time = np.linspace(0, len(signal) / fs, num=len(signal))
 
+    y_max_index= np.where(signal == np.amax(signal))
+    max_x= time[y_max_index]
+
+    x= time[::100]
+    y= signal[::100]
+
     plt.figure(1)
-    plt.title("Audio Signal")
+    plt.title("Audio Signal- Stairs")
     plt.xlabel('Time, s')
-    plt.plot(time, signal)
+    plt.plot(x, y)
+    plt.xlim([max_x, max_x+0.5])
+    plt.grid()
+    plt.savefig('plots/claps/stairs.jpeg')
     plt.show()
-    
+
     return
 
 def get_audio(filename):
