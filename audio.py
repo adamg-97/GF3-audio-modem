@@ -6,6 +6,7 @@ import sys
 import scipy.io.wavfile
 from scipy.signal import chirp, spectrogram, convolve
 from IPython.display import Audio
+import sounddevice as sd
 
 
 def play_audio(filename):
