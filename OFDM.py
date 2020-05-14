@@ -60,7 +60,7 @@ class CamG:
     # Maps the bits to symbols
     def map(self, bits):
         if(type(bits) != np.ndarray): raise ValueError("Bits must be numpy array")
-        return np.array([self.mapping_table[tuple(b)] for b in bits[i,:] for i in range(bits.shape[0])])
+        return np.array([self.mapping_table[tuple(b)] for b in bits[0,:]])# for i in range(0,bits.shape[0])])
     
     
     # De-maps symbols to bits using min distance
