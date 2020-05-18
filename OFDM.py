@@ -1,6 +1,6 @@
 # Header file for OFDM, add libraries and functions here
 import numpy as np
-import scipy as sp
+import scipy
 import matplotlib.pyplot as plt
 from scipy.signal import chirp, convolve
 from scipy.io import wavfile
@@ -19,12 +19,12 @@ class CamG:
         self.ofdm_symbol_size = ofdm_symbol_size    # OFDM symbol size
         self.K = self.ofdm_symbol_size // 2 - 1     # Number of carriers in OFDM symbol i.e. DFT size / 2 - 1
         self.cp_length = cp_length                  # length of cyclic prefix
-        self.P = P                                  # number of pilot carriers per block
+        self.P = P                                  # pilot carriers every P carrier i.e. P = 8 adds pilot every 8th symbol
         self.pilot_value = pilot_value              # Known value that pilot transmits
         
         # Audio params
         self.fs = 44100                             # Audio sampling rate
-        self.gap_length = 1 * self.fs                    # Gap between chirp and transmitted data
+        self.gap_length = 1 * self.fs               # Gap between chirp and transmitted data
         
         # Chirp params
         self.f0 = 500                               # Chirp start frequency
@@ -33,10 +33,12 @@ class CamG:
         self.chirp_method = 'linear'                # Chirp type
 
         # Carrier params
-        self.all_carriers = np.arange(1,self.K+1)                                   # indicies of all subcarriers [1... K]
-        try:    self.pilot_carriers = self.all_carriers[::(self.K+1) // self.P]     # Pilot carriers every K/Pth carrier
-        except: self.pilot_carriers = np.array([])                                  # Exception for no pilot carriers
-        self.data_carriers = np.delete(self.all_carriers, self.pilot_carriers-1)    # Remaining carriers are data carriers
+        self.all_carriers = np.arange(1,self.K+1)                                           # indicies of all subcarriers [1... K]
+        try:
+            self.pilot_carriers = self.all_carriers[::self.P]                               # Pilot carriers every Pth carrier
+            self.pilot_carriers = np.append(self.pilot_carriers, self.all_carriers[-1])     # Add pilot carrier at end
+        except: self.pilot_carriers = np.array([])                                          # Exception for no pilot carriers
+        self.data_carriers = np.delete(self.all_carriers, self.pilot_carriers-1)            # Remaining carriers are data carriers
         
         
         # Modulation params
@@ -60,11 +62,13 @@ class CamG:
             }
             self.mu = 2                         # Bits per symbol
             
+
         else:
             raise ValueError("Invalid Modulation Type")
             
         
         self.bits_per_symbol = len(self.data_carriers) * self.mu            # Bits per OFDM symbol = number of carriers x modulation index
+        self.Hest = None
         
     # Create chirp for synchronisation
     def sync_chirp(self):
@@ -149,7 +153,6 @@ class transmitter(CamG):                                # Inherits class attribu
     def graphs(self):
     
         # Print constellation
-        plt.figure(figsize=(3,2), dpi= 120)
         for b1 in [0, 1]:
             for b0 in [0, 1]:
                 B = (b1, b0)
@@ -194,7 +197,16 @@ class transmitter(CamG):                                # Inherits class attribu
 
         time_data_cp = self.add_cp(time_data)
         
-        return self.send_to_stream(time_data_cp)
+        signal = self.send_to_stream(time_data_cp)
+    
+        time = np.linspace(0,len(signal)/self.fs,len(signal))
+        
+        plt.plot(time, signal)
+        plt.title("Signal")
+        plt.xlabel("t")
+        plt.ylabel("Signal")
+        
+        return signal
         
         
         
@@ -205,6 +217,7 @@ class transmitter(CamG):                                # Inherits class attribu
         #########################################
         
 class receiver(CamG):
+        
     
     # Get data from audio signal
     def get_symbols(self,signal):
@@ -217,7 +230,7 @@ class receiver(CamG):
         index_max = np.where(sync_signal == np.amax(sync_signal))[0][0]
         zero_index = int(1 + index_max + self.chirp_length/2 * self.fs + self.gap_length)
         
-        rx = signal[zero_index -1:zero_index + 100 * (self.ofdm_symbol_size + self.cp_length)]               # This should be adjusted when second end chirp is added in
+        rx = signal[zero_index:zero_index + 100 * (self.ofdm_symbol_size + self.cp_length)]               # This should be adjusted when second end chirp is added in
         
         return rx.reshape(-1,self.cp_length + self.ofdm_symbol_size)
         
@@ -238,39 +251,42 @@ class receiver(CamG):
         
         # Extract data symbols
         data = OFDM_symbols[:,self.data_carriers]
-        
         return data, pilots
     
     
     # Calculate channel estimate from pilot carriers
     def channel_est(self, pilots):
-        try:
-            # Divide by transmitted pilot values and average over OFDM symbols
-            H_pilots = pilots / self.pilot_value
+        #try:
+        # Divide by transmitted pilot values and average over OFDM symbols
+        H_pilots = pilots / self.pilot_value
         
-            H_est_pilots = np.zeros(H_pilots.shape[1],dtype=complex)
+        Hest_pilots = np.zeros(len(self.pilot_carriers),dtype=complex)
         
-            for i in range(0,H_pilots.shape[1]):
-                H_est_pilots.real[i] = np.mean(H[:,i].real)
-                H_est_pilots.imag[i] = np.mean(H[:,i].imag)
-        
-            # Interpolate between the pilot carriers to get an estimate of the channel. Interpolate absolute value and phase eparately
-        
-            h_real_interp = scipy.interpolate.barycentric_interpolate(self.pilot_carriers, h_real_pilots, self.data_carriers)
-            h_imag_interp = scipy.interpolate.barycentric_interpolate(self.pilot_carriers, h_imag_pilots, self.data_carriers)
-        
-            Hest = h_real_interp + 1j * h_imag_interp
+        for i in range(0,len(self.pilot_carriers)):
+            Hest_pilots.real[i] = np.mean(H_pilots[:,i].real)
+            Hest_pilots.imag[i] = np.mean(H_pilots[:,i].imag)
         
         # Handle case of no pilot carriers
-        except:
-            Hest = np.ones(len(self.all_carriers))
+        #except:
+         #   Hest_pilots = np.ones(len(self.pilot_carriers))
             
+        # Interpolate between the pilot carriers to get an estimate of the channel. Interpolate absolute value and phase eparately
+        
+        h_real_interp = scipy.interpolate.interp1d(self.pilot_carriers, Hest_pilots.real, kind='linear')(self.all_carriers)
+        h_imag_interp = scipy.interpolate.interp1d(self.pilot_carriers, Hest_pilots.imag, kind='linear')(self.all_carriers)
+        
+        #h_real_interp = scipy.interpolate.barycentric_interpolate(self.pilot_carriers, Hest_pilots.real, self.all_carriers)
+        #h_imag_interp = scipy.interpolate.barycentric_interpolate(self.pilot_carriers, Hest_pilots.imag, self.all_carriers)
+        
+        Hest = h_real_interp + 1j * h_imag_interp
+        self.Hest = Hest
+        
         return Hest
         
         
     # Equalise data carriers from channel measurements
     def equalise(self, data_symbols, Hest):
-        return data_symbols / Hest
+        return data_symbols / Hest[self.data_carriers]
     
     
     # De-map the constellation symbol to bits using min distance
@@ -323,6 +339,20 @@ class receiver(CamG):
         bits = self.PS(bits_parallel)
 
         return bits
+        
+    # Print graphs
+    def graphs(self):
+        
+        plt.plot(self.all_carriers, self.Hest.real, label='Estimated channel')
+        plt.ylabel("|H(f)|")
+        plt.title("Channel Frequency Response Estimate")
+        plt.show()
+        
+        h = np.fft.ifft(self.Hest)
+        time = np.linspace(0,(len(h)), len(h))
+        plt.plot(time[:100],h.real[:100])
+        plt.show()
+        
 
 
 # Play Audio:
@@ -341,7 +371,6 @@ def play_record(signal,fs, padding_before=1, padding_after=1):
 
     data_padded = np.pad(signal, (int(padding_before*fs), int(padding_after*fs)), 'constant', constant_values=0)
     print("Recording...")
-    print(type(data_padded))
     signal = sd.playrec(data_padded, fs)
     sd.wait()
     print("Finished recording")
