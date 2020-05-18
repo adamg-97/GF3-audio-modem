@@ -13,14 +13,14 @@ sd.default.channels = 1
 #########################################
 
 class CamG:
-    def __init__(self, ofdm_symbol_size, cp_length, modulation, P=0):
+    def __init__(self, ofdm_symbol_size, cp_length, modulation, P=0, pilot_value=None):
     
         # OFDM params
         self.ofdm_symbol_size = ofdm_symbol_size    # OFDM symbol size
         self.K = self.ofdm_symbol_size // 2 - 1     # Number of carriers in OFDM symbol i.e. DFT size / 2 - 1
         self.cp_length = cp_length                  # length of cyclic prefix
         self.P = P                                  # number of pilot carriers per block
-        self.pilot_value = None                     # Know value that pilot transmits
+        self.pilot_value = pilot_value              # Known value that pilot transmits
         
         # Audio params
         self.fs = 44100                             # Audio sampling rate
@@ -33,10 +33,10 @@ class CamG:
         self.chirp_method = 'linear'                # Chirp type
 
         # Carrier params
-        self.all_carriers = np.arange(1,self.K+1)                               # indicies of all subcarriers [1... K]
-        try:    self.pilot_carriers = self.all_carriers[::self.K // self.P]     # Pilot carriers every K/Pth carrier
-        except: self.pilot_carriers = np.array([])                              # Exception for no pilot carriers
-        self.data_carriers = np.delete(self.all_carriers, self.pilot_carriers)  # Remaining carriers are data carriers
+        self.all_carriers = np.arange(1,self.K+1)                                   # indicies of all subcarriers [1... K]
+        try:    self.pilot_carriers = self.all_carriers[::(self.K+1) // self.P]     # Pilot carriers every K/Pth carrier
+        except: self.pilot_carriers = np.array([])                                  # Exception for no pilot carriers
+        self.data_carriers = np.delete(self.all_carriers, self.pilot_carriers-1)    # Remaining carriers are data carriers
         
         
         # Modulation params
@@ -149,17 +149,28 @@ class transmitter(CamG):                                # Inherits class attribu
     def graphs(self):
     
         # Print constellation
+        plt.figure(figsize=(3,2), dpi= 120)
         for b1 in [0, 1]:
             for b0 in [0, 1]:
                 B = (b1, b0)
                 Q = self.mapping_table[B]
                 plt.plot(Q.real, Q.imag, 'bo')
-                plt.text(Q.real, Q.imag+0.2, "".join(str(x) for x in B), ha='center')
-                plt.title("QPSK Constellation with Gray Mapping")
-                plt.figure(figsize=(10,6))
-                plt.show()
+                plt.text(Q.real, Q.imag+0.1, "".join(str(x) for x in B), ha='center')
+        plt.grid(alpha=0.5)
+        plt.xlim(-1,1)
+        plt.ylim(-1,1)
+        plt.title("QPSK Constellation with Gray Mapping")
+        plt.show()
                 
         # Print carriers
+        plt.figure(figsize=(6,1), dpi=80)
+        plt.plot(self.pilot_carriers, np.zeros_like(self.pilot_carriers), 'bo', label='pilot')
+        plt.plot(self.data_carriers, np.zeros_like(self.data_carriers), 'ro', label='data')
+        plt.yticks([])
+        plt.xlim(0,32)
+        plt.title("Carriers")
+        plt.legend(bbox_to_anchor=(1.1, 0.75))
+        plt.show()
         
         # Print output data
     
@@ -180,7 +191,7 @@ class transmitter(CamG):                                # Inherits class attribu
         print("Number of OFDM symbols to transmit: " + str(OFDM_symbols.shape[0]))
         
         time_data = np.fft.ifft(OFDM_symbols)
-        x = time_data[:,:-10]
+
         time_data_cp = self.add_cp(time_data)
         
         return self.send_to_stream(time_data_cp)
@@ -245,11 +256,10 @@ class receiver(CamG):
         
             # Interpolate between the pilot carriers to get an estimate of the channel. Interpolate absolute value and phase eparately
         
-            Hest_abs = scipy.interpolate.interp1d(self.pilot_carriers, abs(H_est_pilots), kind='linear')(self.all_carriers)
+            h_real_interp = scipy.interpolate.barycentric_interpolate(self.pilot_carriers, h_real_pilots, self.data_carriers)
+            h_imag_interp = scipy.interpolate.barycentric_interpolate(self.pilot_carriers, h_imag_pilots, self.data_carriers)
         
-            Hest_phase = scipy.interpolate.interp1d(self.pilot_carriers, np.angle(H_est_pilots), kind='linear')(self.all_carriers)
-        
-            Hest = Hest_abs * np.exp(1j*Hest_phase)
+            Hest = h_real_interp + 1j * h_imag_interp
         
         # Handle case of no pilot carriers
         except:
