@@ -141,13 +141,14 @@ class transmitter(CamG):                                # Inherits class attribu
         tx = tx_data.real
         
         # Pad with zeros to separate from chirp
-        tx = np.pad(tx, (self.gap_length,0), mode='constant', constant_values=0)
+        padding = np.zeros(self.gap_length)
         
         # Chirp
         fsweep = self.sync_chirp()
+        fsweep_reverse = fsweep[::-1]
         
         # Add chirp and return
-        return np.hstack([fsweep,tx])
+        return np.hstack([fsweep,padding,tx,padding,fsweep_reverse])
         
     
     def graphs(self):
@@ -178,11 +179,11 @@ class transmitter(CamG):                                # Inherits class attribu
         # Print output data
     
     # Overall transmit function
-    def transmit(self,bits):
+    def transmit(self,bits, graph_output=False):
         
         
-        print("\n" + "-" * 42 + "\nTRANSMIT\n" + "-" * 42 + "\n")
-        print("\nOFDM Paramters:")
+        print("-" * 42 + "\nTRANSMIT\n" + "-" * 42)
+        print("OFDM Paramters:")
         print(self)
         
         bits_parallel = self.SP(bits)
@@ -200,11 +201,11 @@ class transmitter(CamG):                                # Inherits class attribu
         signal = self.send_to_stream(time_data_cp)
     
         time = np.linspace(0,len(signal)/self.fs,len(signal))
-        
-        plt.plot(time, signal)
-        plt.title("Signal")
-        plt.xlabel("t")
-        plt.ylabel("Signal")
+        if(graph_output == True):
+            plt.plot(time, signal)
+            plt.title("Signal")
+            plt.xlabel("t")
+            plt.ylabel("Signal")
         
         return signal
         
@@ -222,16 +223,21 @@ class receiver(CamG):
     # Get data from audio signal
     def get_symbols(self,signal):
         
-        fsweep_reverse = self.sync_chirp()[::-1]
+        fsweep = self.sync_chirp()
+        fsweep_reverse = fsweep[::-1]
         
-        sync_signal = np.convolve(signal,fsweep_reverse,mode="same")
+        start_sync_signal = convolve(signal, fsweep_reverse, mode="same")
+        end_sync_signal = convolve(signal, fsweep, mode="same")
         
         # Find max index and index of signal start
-        index_max = np.where(sync_signal == np.amax(sync_signal))[0][0]
-        zero_index = int(1 + index_max + self.chirp_length/2 * self.fs + self.gap_length)
+        start_index_max = np.where(start_sync_signal == np.amax(start_sync_signal))[0][0]
+        end_index_max = np.where(end_sync_signal == np.amax(end_sync_signal))[0][0]
         
-        rx = signal[zero_index:zero_index + 100 * (self.ofdm_symbol_size + self.cp_length)]               # This should be adjusted when second end chirp is added in
+        zero_index = int(1 + start_index_max + self.chirp_length/2 * self.fs + self.gap_length)
+        end_index = int(end_index_max + 1 - self.chirp_length/2 * self.fs - self.gap_length)
         
+        rx = signal[zero_index:end_index]               # This should be adjusted when second end chirp is added in
+
         return rx.reshape(-1,self.cp_length + self.ofdm_symbol_size)
         
     
@@ -320,7 +326,9 @@ class receiver(CamG):
     # Overall receive function
     def receive(self, signal):
         
-        print("\n" + "-" * 42 + "\n Receive \n" + "-" * 42 + "\n")
+        print("-" * 42 + "\nReceive \n" + "-" * 42)
+        print("OFDM Paramters:")
+        print(self)
         
         rx_signal_cp = self.get_symbols(signal)
         
@@ -345,12 +353,16 @@ class receiver(CamG):
         
         plt.plot(self.all_carriers, self.Hest.real, label='Estimated channel')
         plt.ylabel("|H(f)|")
+        plt.xlabel("Frequency Bins")
         plt.title("Channel Frequency Response Estimate")
         plt.show()
         
         h = np.fft.ifft(self.Hest)
         time = np.linspace(0,(len(h)), len(h))
         plt.plot(time[:100],h.real[:100])
+        plt.title("Channel Impulse Response")
+        plt.ylabel("h")
+        plt.xlabel("time")
         plt.show()
         
 
