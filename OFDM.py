@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import chirp, convolve
 from scipy.io import wavfile
 import sounddevice as sd
+import pandas as pd
 sd.default.channels = 1
 
 
@@ -74,7 +75,7 @@ class CamG:
     def sync_chirp(self):
             
         t = np.linspace(0, self.chirp_length, self.chirp_length*self.fs)
-        return chirp(t, f0=self.f0, f1=self.f1, t1=self.chirp_length, method=self.chirp_method)
+        return 0.25 * chirp(t, f0=self.f0, f1=self.f1, t1=self.chirp_length, method=self.chirp_method)
             
             
         # Prints out key OFDM attributes
@@ -96,8 +97,13 @@ class CamG:
     
 class transmitter(CamG):                                # Inherits class attributes from CamG
 
-    # Pad bits to right length
-
+    # Pad bits with zeros to right length
+    def pad(self,bits):
+        padding_length = (self.bits_per_symbol - len(bits) % self.bits_per_symbol) % self.bits_per_symbol
+        padding = np.zeros(padding_length)
+        return np.hstack([bits,padding])
+    
+    
     # Shapes serial bits into parallel stream for OFDM
     def SP(self, bits):
         return bits.reshape(-1,len(self.data_carriers), self.mu)
@@ -120,10 +126,10 @@ class transmitter(CamG):                                # Inherits class attribu
             symbols[:,-self.pilot_carriers] = np.conj(self.pilot_value)
         except: None
         
-        # Allocate data carriers
+        # Allocate data carrier
         symbols[:,self.data_carriers] = payload
         symbols[:,-self.data_carriers] = np.conj(payload)
-        
+
         return symbols
         
     
@@ -186,8 +192,8 @@ class transmitter(CamG):                                # Inherits class attribu
         print("OFDM Paramters:")
         print(self)
         
-        bits_parallel = self.SP(bits)
-    
+        bits_padded = self.pad(bits)
+        bits_parallel = self.SP(bits_padded)
         constellation = self.map(bits_parallel)
         
         OFDM_symbols = self.build_OFDM_symbol(constellation)
@@ -200,15 +206,14 @@ class transmitter(CamG):                                # Inherits class attribu
         
         signal = self.send_to_stream(time_data_cp)
     
-        time = np.linspace(0,len(signal)/self.fs,len(signal))
         if(graph_output == True):
+            time = np.linspace(0,len(signal)/self.fs,len(signal))
             plt.plot(time, signal)
             plt.title("Signal")
-            plt.xlabel("t")
+            plt.xlabel("time")
             plt.ylabel("Signal")
         
         return signal
-        
         
         
         
@@ -271,11 +276,7 @@ class receiver(CamG):
         for i in range(0,len(self.pilot_carriers)):
             Hest_pilots.real[i] = np.mean(H_pilots[:,i].real)
             Hest_pilots.imag[i] = np.mean(H_pilots[:,i].imag)
-        
-        # Handle case of no pilot carriers
-        #except:
-         #   Hest_pilots = np.ones(len(self.pilot_carriers))
-            
+
         # Interpolate between the pilot carriers to get an estimate of the channel. Interpolate absolute value and phase eparately
         
         h_real_interp = scipy.interpolate.interp1d(self.pilot_carriers, Hest_pilots.real, kind='linear')(self.all_carriers)
@@ -322,32 +323,6 @@ class receiver(CamG):
     # Print channel estimation
     # Print symbol mapping
     
-
-    # Overall receive function
-    def receive(self, signal):
-        
-        print("-" * 42 + "\nReceive \n" + "-" * 42)
-        print("OFDM Paramters:")
-        print(self)
-        
-        rx_signal_cp = self.get_symbols(signal)
-        
-        rx_signal = self.remove_cp(rx_signal_cp)
-        
-        OFDM_symbols = np.fft.fft(rx_signal)
-
-        data, pilots = self.get_data(OFDM_symbols)
-        
-        Hest = self.channel_est(pilots)
-        
-        data_symbols = self.equalise(data, Hest)
-        
-        bits_parallel, hardDecision = self.demap(data_symbols)
-        
-        bits = self.PS(bits_parallel)
-
-        return bits
-        
     # Print graphs
     def graphs(self):
         
@@ -365,6 +340,45 @@ class receiver(CamG):
         plt.xlabel("time")
         plt.show()
         
+        
+
+
+    # Overall receive function
+    def receive(self, signal):
+        
+        print("-" * 42 + "\nReceive \n" + "-" * 42)
+        print("OFDM Paramters:")
+        print(self)
+        
+        rx_signal_cp = self.get_symbols(signal)
+        
+        rx_signal = self.remove_cp(rx_signal_cp)
+        
+        print("Number of received OFDM symbols:    " + str(len(rx_signal)))
+        
+        OFDM_symbols = np.fft.fft(rx_signal)
+
+        data, pilots = self.get_data(OFDM_symbols)
+        
+        Hest = self.channel_est(pilots)
+        
+        data_symbols = self.equalise(data, Hest)
+        
+        bits_parallel, hardDecision = self.demap(data_symbols)
+        
+        bits = self.PS(bits_parallel)
+        
+        print("Number of received bits:            " + str(len(bits)))
+        
+        for qam, hard in zip(data_symbols[0,:10], hardDecision[0,:10]):
+            plt.plot([qam.real, hard.real], [qam.imag, hard.imag], 'b-o')
+            plt.plot(hardDecision.real, hardDecision.imag, 'ro')
+        plt.show()
+        
+        return bits
+        
+            
+            
 
 
 # Play Audio:
@@ -399,3 +413,64 @@ def play_record(signal,fs, padding_before=1, padding_after=1):
 #def output file # Play if audio, show if picture
 
 #def bitwise error correcting code
+
+
+class channel(transmitter,receiver):
+
+    def measure_channel(self, bits):
+    
+        print("-" * 42 + "\nMeasure Channel\n" + "-" * 42)
+        print("OFDM Paramters:")
+        print(self)
+    
+        # Set pilots to 0
+        self.P = 0
+        
+        # Transmit signal
+        bits_padded = self.pad(bits)
+        bits_parallel = self.SP(bits_padded)
+        constellation = self.map(bits_parallel)
+        OFDM_symbols = self.build_OFDM_symbol(constellation)
+        time_data = np.fft.ifft(OFDM_symbols)
+        time_data_cp = self.add_cp(time_data)
+        signal = self.send_to_stream(time_data_cp)
+        
+        # Play and record signal
+        signal = play_record(signal, self.fs)
+        
+        # Receive symbol data
+        rx_signal_cp = self.get_symbols(signal)
+        rx_signal = self.remove_cp(rx_signal_cp)
+        OFDM_symbols = np.fft.fft(rx_signal)
+        data, pilots = self.get_data(OFDM_symbols)
+        
+        # Measure channel response
+        H_all = data / constellation
+        
+        H = np.zeros(len(self.data_carriers),dtype=complex)
+        
+        for i in range(0,len(self.data_carriers)):
+            H.real[i] = np.mean(H_all[:,i].real)
+            H.imag[i] = np.mean(H_all[:,i].imag)
+        
+        plt.plot(self.data_carriers, H.real, label='Measured channel')
+        plt.ylabel("|H(f)|")
+        plt.xlabel("Frequency Bins")
+        plt.title("Channel Frequency Response")
+        plt.savefig("plots/frequency_response")
+        plt.show()
+        
+        h = np.fft.ifft(H)
+        time = np.linspace(0,(len(h)), len(h))
+        plt.plot(time[:100],h.real[:100])
+        plt.title("Channel Impulse Response")
+        plt.ylabel("h")
+        plt.xlabel("time")
+        plt.savefig("plots/impulse_response")
+        plt.show()
+
+        
+        #np.savetxt('channel.csv', h[:100], delimiter=',')
+        
+        return H, h
+        
