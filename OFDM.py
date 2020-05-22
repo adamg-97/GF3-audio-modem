@@ -14,17 +14,19 @@ sd.default.channels = 1
 #########################################
 
 class CamG:
-    def __init__(self, ofdm_symbol_size, cp_length, modulation, pilot_sequence=np.array([]), end_chirp=True):
+    def __init__(self, ofdm_symbol_size, cp_length, modulation, fs=44100, pilot_sequence=np.array([]), end_chirp=True):
     
         # OFDM params
         self.ofdm_symbol_size = ofdm_symbol_size    # OFDM symbol size
         self.K = self.ofdm_symbol_size // 2 - 1     # Number of carriers in OFDM symbol i.e. DFT size / 2 - 1
         self.cp_length = cp_length                  # length of cyclic prefix
         self.pilot_sequence = pilot_sequence        # Known values of the pilot symbols to transmit before data
+        self.symbols_per_frame = -1                 # Number of sybmols per frame with SchmidlCox pramble
+        self.pre_length =  1                        # Preamble length for Schmidl Cox Symbol
         
         
         # Audio params
-        self.fs = 44100                             # Audio sampling rate
+        self.fs = fs                                # Audio sampling rate
         
         # Chirp params
         self.f0 = 100                               # Chirp start frequency
@@ -32,7 +34,7 @@ class CamG:
         self.chirp_length = 1                       # Chirp time
         self.chirp_method = 'linear'                # Chirp type
         self.end_chirp = end_chirp                  # Turns terminating chirp on/off
-        self.gap_length = 0                         # Gap between chirp and transmission in s
+        self.gap_length = 0                         # Gap between chirp and transmission in samples
 
         # Carrier params
         self.data_carriers = np.arange(1,self.K+1)                                           # indicies of all subcarriers [1... K]
@@ -72,7 +74,8 @@ class CamG:
     def sync_chirp(self):
             
         t = np.linspace(0, self.chirp_length, self.chirp_length*self.fs)
-        return 0.25 * chirp(t, f0=self.f0, f1=self.f1, t1=self.chirp_length, method=self.chirp_method)
+        return chirp(t, f0=self.f0, f1=self.f1, t1=self.chirp_length, method=self.chirp_method)
+        
             
             
         # Prints out key OFDM attributes
@@ -146,9 +149,10 @@ class transmitter(CamG):                                # Inherits class attribu
         # Convert to serial stream and take real part
         tx_data = time_data.reshape(-1)
         tx = tx_data.real
+
         
         # Pad with zeros to separate from chirp
-        padding = np.zeros(int(self.gap_length * self.fs))
+        padding = np.zeros(int(self.gap_length))
         
         # Chirp
         fsweep = self.sync_chirp()
@@ -229,20 +233,23 @@ class receiver(transmitter):
         fsweep = self.sync_chirp()
         fsweep_reverse = fsweep[::-1]
         
-        start_sync_signal = convolve(signal, fsweep_reverse, mode="same")
-        end_sync_signal = convolve(signal, fsweep, mode="same")
+        start_sync_signal = convolve(signal, fsweep_reverse, mode="full")
+        end_sync_signal = convolve(signal, fsweep, mode="full")
         
         # Find max index and index of signal start
         start_index_max = np.where(start_sync_signal == np.amax(start_sync_signal))[0][0]
         end_index_max = np.where(end_sync_signal == np.amax(end_sync_signal))[0][0]
         
-        zero_index = int(1 + start_index_max + (self.chirp_length/2 + self.gap_length) * self.fs)
-        end_index = int(end_index_max + 1 - (self.chirp_length/2 + self.gap_length) * self.fs)
+
+        zero_index = int(1 + start_index_max + self.gap_length)
+        end_index = int(end_index_max + 1 - (self.chirp_length * self.fs + self.gap_length) )
         
         if(self.end_chirp == True):
             rx = signal[zero_index:end_index]
         else:
             rx = signal[zero_index:]
+            end_index = len(rx) % self.ofdm_symbol_size
+            rx = rx[:-end_index]
 
         return rx.reshape(-1,self.cp_length + self.ofdm_symbol_size), start_sync_signal
         
@@ -360,10 +367,10 @@ class receiver(transmitter):
         
         print("Number of received bits:            " + str(len(bits)))
         
-        for qam, hard in zip(data_symbols[0,:10], hardDecision[0,:10]):
-            plt.plot([qam.real, hard.real], [qam.imag, hard.imag], 'b-o')
-            plt.plot(hardDecision.real, hardDecision.imag, 'ro')
-        plt.show()
+        #for qam, hard in zip(data_symbols[0,:10], hardDecision[0,:10]):
+         #   plt.plot([qam.real, hard.real], [qam.imag, hard.imag], 'b-o')
+          #  plt.plot(hardDecision.real, hardDecision.imag, 'ro')
+        #plt.show()
         
         return bits
         
@@ -463,4 +470,37 @@ class channel(receiver):
         #np.savetxt('channel.csv', h[:100], delimiter=',')
         
         return H, h
+
+# Save the output file using specified name and file size detecting null terminated string
+def save_file(rx_bits):
+
+    file_name = []
+    file_size = []
+    data = np.packbits(rx_bits)
+
+    for item in data:
+        if(item == 0):
+            data = data[1:]
+            break
+        else:
+            file_name.append(item)
+            data = data[1:]
         
+    for item in data:
+        if(item == 0):
+            data = data[1:]
+            break
+        else:
+            file_size.append(item)
+            data = data[1:]
+
+    file_name = "".join([chr(item) for item in file_name])
+    file_size = "".join([chr(item) for item in file_size])
+
+    print("File Name: " + file_name + "\nFile Size: " + file_size)
+
+    data = data[:int(file_size)]
+
+    f = open("output_files/" + file_name, 'wb')
+    f.write(data)
+    f.close()
