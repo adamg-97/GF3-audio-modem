@@ -7,6 +7,7 @@ from scipy.io import wavfile
 import sounddevice as sd
 import pandas as pd
 sd.default.channels = 1
+from IPython.display import Audio
 
 
 #########################################
@@ -14,19 +15,26 @@ sd.default.channels = 1
 #########################################
 
 class CamG:
-    def __init__(self, ofdm_symbol_size, cp_length, modulation, fs=44100, pilot_sequence=np.array([]), end_chirp=True):
+    def __init__(self, ofdm_symbol_size, cp_length, modulation, fs=44100, pilot_sequence=np.array([]), sync_method= "chirp", end_chirp=True):
+    
+        # Audio params
+        self.fs = fs                                # Audio sampling rate
     
         # OFDM params
         self.ofdm_symbol_size = ofdm_symbol_size    # OFDM symbol size
-        self.K = self.ofdm_symbol_size // 2 - 1     # Number of carriers in OFDM symbol i.e. DFT size / 2 - 1
         self.cp_length = cp_length                  # length of cyclic prefix
+        self.K = self.ofdm_symbol_size // 2 - 1     # Number of carriers in OFDM symbol i.e. DFT size / 2 - 1
+        self.data_carriers = np.arange(1,self.K+1)  # indicies of subcarriers [1... K+1]
+        
         self.pilot_sequence = pilot_sequence        # Known values of the pilot symbols to transmit before data
-        self.symbols_per_frame = -1                 # Number of sybmols per frame with SchmidlCox pramble
-        self.pre_length =  1                        # Preamble length for Schmidl Cox Symbol
+        self.Hest = np.ones(self.K)                 # Default flat channel response
+ 
+        # Sync params
+        self.sync_method = sync_method              # Synchronisation method
         
-        
-        # Audio params
-        self.fs = fs                                # Audio sampling rate
+        # Schmidl & Cox params
+        #self.symbols_per_frame = -1                # Number of sybmols per frame with SchmidlCox pramble
+        self.L =  2048                              # Preamble length for Schmidl Cox Symbol
         
         # Chirp params
         self.f0 = 100                               # Chirp start frequency
@@ -36,10 +44,7 @@ class CamG:
         self.end_chirp = end_chirp                  # Turns terminating chirp on/off
         self.gap_length = 0                         # Gap between chirp and transmission in samples
 
-        # Carrier params
-        self.data_carriers = np.arange(1,self.K+1)                                           # indicies of all subcarriers [1... K]
-        
-        
+
         # Modulation params
         self.modulation = modulation            # Modulation method
         
@@ -66,8 +71,7 @@ class CamG:
             raise ValueError("Invalid Modulation Type")
             
         
-        self.bits_per_symbol = len(self.data_carriers) * self.mu    # Bits per OFDM symbol = number of carriers x modulation index
-        self.Hest = np.ones(self.K)                                 # Default flat channel response
+        self.bits_per_symbol = len(self.data_carriers) * self.mu    # Bits per OFDM symbol
         
         
     # Create chirp for synchronisation
@@ -78,9 +82,9 @@ class CamG:
         
             
             
-        # Prints out key OFDM attributes
+    # Prints out key OFDM attributes
     def __repr__(self):
-        return  "Number of actual Sub Carriers:      {:.0f} \nCyclic prefix length:               {:.0f} \nModulation method:                  {}".format(self.K, self.cp_length, self.modulation)
+        return  "Number of actual Sub Carriers:      {:.0f} \nCyclic prefix length:               {:.0f} \nModulation method:                  {} \nSync Method:                        {}".format(self.K, self.cp_length, self.modulation, self.sync_method)
         
     
 
@@ -228,30 +232,53 @@ class receiver(transmitter):
         
     
     # Get data from audio signal
-    def get_symbols(self,signal):
+    def get_symbols(self,r):
         
-        fsweep = self.sync_chirp()
-        fsweep_reverse = fsweep[::-1]
+        # Chirp method
+        if(self.sync_method == "chirp"):
         
-        start_sync_signal = convolve(signal, fsweep_reverse, mode="full")
-        end_sync_signal = convolve(signal, fsweep, mode="full")
+            fsweep = self.sync_chirp()
+            fsweep_reverse = fsweep[::-1]
+            
+            P = convolve(r, fsweep_reverse, mode="full")
+            P_end = convolve(r, fsweep, mode="full")
+            
+            # Find max index and index of signal start
+            start_index_max = np.where(P == np.amax(P))[0][0]
+            end_index_max = np.where(P_end == np.amax(P_end))[0][0]
+            
+            zero_index = int(1 + start_index_max + self.gap_length)
+            end_index = int(end_index_max + 1 - (self.chirp_length * self.fs + self.gap_length) )
+            
+            if(self.end_chirp == True):
+                rx = r[zero_index:end_index]
+            else:
+                rx = r[zero_index:]
+                end_index = len(rx) % self.ofdm_symbol_size
+                rx = rx[:-end_index]
         
-        # Find max index and index of signal start
-        start_index_max = np.where(start_sync_signal == np.amax(start_sync_signal))[0][0]
-        end_index_max = np.where(end_sync_signal == np.amax(end_sync_signal))[0][0]
-        
-
-        zero_index = int(1 + start_index_max + self.gap_length)
-        end_index = int(end_index_max + 1 - (self.chirp_length * self.fs + self.gap_length) )
-        
-        if(self.end_chirp == True):
-            rx = signal[zero_index:end_index]
-        else:
-            rx = signal[zero_index:]
+        # Schmidl & Cox method
+        elif(self.sync_method == "schmidlcox"):
+            
+            # Search first 5s
+            search_length = 5 * self.fs
+            d_set = np.arange(0,search_length)
+            
+            # Calculate P using method in the paper
+            P = np.zeros(len(d_set), dtype=complex)
+            for d in d_set[:-1]:
+                P[d+1] = P[d] + r[d+self.L].conj() * r[d+ 2*self.L] - r[d].conj() * r[d+self.L]
+            
+            zero_index = np.where(abs(P) == np.amax(abs(P)))[0][0] + self.ofdm_symbol_size - 1
+            
+            rx = r[zero_index:]
             end_index = len(rx) % self.ofdm_symbol_size
             rx = rx[:-end_index]
-
-        return rx.reshape(-1,self.cp_length + self.ofdm_symbol_size), start_sync_signal
+        
+        else:
+            raise ValueError("Invalid Synchronisation Method")
+        
+        return rx.reshape(-1,self.cp_length + self.ofdm_symbol_size), P
         
     
     # Remove the cyclic prefix
@@ -341,7 +368,7 @@ class receiver(transmitter):
 
 
     # Overall receive function
-    def receive(self, signal):
+    def receive(self, signal, graph_output=False):
         
         print("-" * 42 + "\nReceive \n" + "-" * 42)
         print("OFDM Paramters:")
@@ -367,10 +394,11 @@ class receiver(transmitter):
         
         print("Number of received bits:            " + str(len(bits)))
         
-        #for qam, hard in zip(data_symbols[0,:10], hardDecision[0,:10]):
-         #   plt.plot([qam.real, hard.real], [qam.imag, hard.imag], 'b-o')
-          #  plt.plot(hardDecision.real, hardDecision.imag, 'ro')
-        #plt.show()
+        if(graph_output == True):
+            for qam, hard in zip(data_symbols[0,:10], hardDecision[0,:10]):
+                plt.plot([qam.real, hard.real], [qam.imag, hard.imag], 'b-o')
+                plt.plot(hardDecision.real, hardDecision.imag, 'ro')
+            plt.show()
         
         return bits
         
@@ -472,7 +500,7 @@ class channel(receiver):
         return H, h
 
 # Save the output file using specified name and file size detecting null terminated string
-def save_file(rx_bits):
+def save_file(rx_bits, audio_fs=8000):
 
     file_name = []
     file_size = []
@@ -497,10 +525,17 @@ def save_file(rx_bits):
     file_name = "".join([chr(item) for item in file_name])
     file_size = "".join([chr(item) for item in file_size])
 
-    print("File Name: " + file_name + "\nFile Size: " + file_size)
+    print("File Name: " + file_name + "\nFile Size: " + file_size + " bytes")
 
     data = data[:int(file_size)]
-
-    f = open("output_files/" + file_name, 'wb')
-    f.write(data)
-    f.close()
+    
+    if(file_name[-3:] == "wav"):
+        wavfile.write(r"output_files/" + file_name, audio_fs, data)
+        
+        
+    else:
+        f = open("output_files/" + file_name, 'wb')
+        f.write(data)
+        f.close()
+        
+    return file_name
