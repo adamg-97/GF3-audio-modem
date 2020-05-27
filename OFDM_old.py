@@ -2,7 +2,7 @@
 import numpy as np
 import scipy
 import matplotlib.pyplot as plt
-from scipy.signal import chirp, convolve, lfilter
+from scipy.signal import chirp, convolve
 from scipy.io import wavfile
 import sounddevice as sd
 import pandas as pd
@@ -15,37 +15,38 @@ from IPython.display import Audio
 #########################################
 
 class CamG:
-    def __init__(self, mode, known_sequence=np.array([]), no_pilots=10, packet_length=180):
+    def __init__(self, ofdm_symbol_size, cp_length, modulation, fs=44100, no_pilots=0, pilot_sequence=np.array([]), sync_method= "chirp", end_sync=False):
     
         # Audio params
-        self.fs = 48000                                # Audio sampling rate
+        self.fs = fs                                # Audio sampling rate
     
         # OFDM params
-        self.ofdm_symbol_size = 4096                # OFDM symbol size
+        self.ofdm_symbol_size = ofdm_symbol_size    # OFDM symbol size
+        self.cp_length = cp_length                  # length of cyclic prefix
         self.K = self.ofdm_symbol_size // 2 - 1     # Number of carriers in OFDM symbol i.e. DFT size / 2 - 1
         self.data_carriers = np.arange(1,self.K+1)  # indicies of subcarriers [1... K+1]
-        self.packet_length = packet_length          # Number of OFDM data symbols in a packet
-        self.no_pilots = no_pilots                  # Number of pilot symbols preceeding and following data
-        self.known_sequence = known_sequence        # Known values of the pilot symbols to transmit before data
         
-        cp_modes = [224, 704, 1184]
-        self.cp_length = cp_modes[mode-1]           # length of cyclic prefix based on mode
+        self.no_pilots = no_pilots                  # Number of pilot symbols preceeding data
+        self.pilot_sequence = pilot_sequence        # Known values of the pilot symbols to transmit before data
+        self.Hest = np.ones(self.K)                 # Default flat channel response
  
         # Sync params
-        self.sync_method = "chirp"                  # Synchronisation method
+        self.sync_method = sync_method              # Synchronisation method
         
         # Schmidl & Cox Params
         self.L = self.K + 1                         # Preamble size - note this is the number of actual OFDM carriers K + zero frequency
         
         # Chirp params
-        self.f0 = 2000                                                  # Chirp start frequency
-        self.f1 = 4000                                                  # Chirp finish frequency
-        self.chirp_length = 5*(self.ofdm_symbol_size + self.cp_length)  # Chirp time
-
+        self.f0 = 100                               # Chirp start frequency
+        self.f1 = 8000                              # Chirp finish frequency
+        self.chirp_length = 1                       # Chirp time
+        self.chirp_method = 'linear'                # Chirp type
+        self.end_sync = end_sync                  # Turns terminating chirp on/off
+        self.gap_length = 0                         # Gap between chirp and transmission in samples
 
 
         # Modulation params
-        self.modulation = "QPSK"                # Modulation method
+        self.modulation = modulation            # Modulation method
         
         if(self.modulation == "QPSK"):
             self.mapping_table = {              # Mapping table
@@ -76,17 +77,22 @@ class CamG:
     # Create chirp for synchronisation
     def sync_chirp(self):
             
-        t = np.linspace(0, self.chirp_length/self.fs, self.chirp_length)
-        return chirp(t, f0=self.f0, f1=self.f1, t1=self.chirp_length/self.fs, method='linear')
+        t = np.linspace(0, self.chirp_length, self.chirp_length*self.fs)
+        return chirp(t, f0=self.f0, f1=self.f1, t1=self.chirp_length, method=self.chirp_method)
         
             
             
     # Prints out key OFDM attributes
     def __repr__(self):
-        return  "Number of actual Sub Carriers:      {:.0f} \nCyclic prefix length:               {:.0f} \nModulation method:                  {} \nSync Method:                        {} \nPacket Length:                      {}".format(self.K, self.cp_length, self.modulation, self.sync_method, self.packet_length)
+        return  "Number of actual Sub Carriers:      {:.0f} \nCyclic prefix length:               {:.0f} \nModulation method:                  {} \nSync Method:                        {}".format(self.K, self.cp_length, self.modulation, self.sync_method)
         
     
 
+        
+        
+        
+        
+        
         
         
     #########################################
@@ -95,34 +101,45 @@ class CamG:
     
 class transmitter(CamG):                                # Inherits class attributes from CamG
 
-    # Pad bits with zeros to right length for symbols and packets
+    # Pad bits with zeros to right length
     def pad(self,bits):
-    
-        # Pad to integer number of symbols
-        if(self.packet_length == -1):
-            padding_length = (self.bits_per_symbol - len(bits) % self.bits_per_symbol) % self.bits_per_symbol
-            
-        # Pad to integer number of packets
-        else:
-            bits_per_packet = self.bits_per_symbol * self.packet_length
-            padding_length = (bits_per_packet - len(bits) % bits_per_packet) % bits_per_packet
-            
-        # Pad with random data - packing with zeros is bad
-        padding = np.random.binomial(n=1, p=0.5, size=(padding_length,))
+        padding_length = (self.bits_per_symbol - len(bits) % self.bits_per_symbol) % self.bits_per_symbol
+        padding = np.zeros(padding_length)
         return np.hstack([bits,padding])
+    
+    def add_pilots(self,bits):
+        if(self.no_pilots == 0):
+            return bits
+            
+        elif(self.no_pilots > 0 and self.pilot_sequence.size % self.bits_per_symbol == 0 and self.pilot_sequence.size > 0):
+            return np.hstack([np.tile(self.pilot_sequence, self.no_pilots),bits])
+
+        else:
+            raise ValueError("Known Sequence length must be integer multiple of bits per OFDM symbol")
         
     
     # Shapes serial bits into parallel stream for OFDM
     def SP(self, bits):
-        return bits.reshape(-1,self.K, self.mu)
+        return bits.reshape(-1,len(self.data_carriers), self.mu)
         
 
     # Maps the bits to symbols
     def map(self, bits):
+        if(type(bits) != np.ndarray): raise ValueError("Bits must be numpy array")
         return np.array([[self.mapping_table[tuple(b)] for b in bits[i,:]] for i in range(bits.shape[0])])
-
     
-
+    
+    # Build Schmidl & Cox Symbols for synchronisation
+    def build_schmidlcox(self):
+        
+        # Map known sequence to symbols
+        symbols = self.map(self.SP(self.pilot_sequence))
+        
+        # Create all 0 symbol, adds known symbols at all odd bins
+        p = np.zeros(self.K, dtype=complex)
+        p[::2] = symbols[0,:self.K // 2]
+        return p.reshape(-1, self.K)
+        
         
         
     # Allocates symbols and pilots, and adds zeros and conjugate to make signal real
@@ -134,77 +151,44 @@ class transmitter(CamG):                                # Inherits class attribu
         symbols[:,self.data_carriers] = payload
         symbols[:,-self.data_carriers] = np.conj(payload)
         
+
         return symbols
         
     
     # Add the cyclic prefix
     def add_cp(self, time_data):
-        cyclic_prefix = time_data[:,-self.cp_length:]           # take the last cp samples
-        if(self.cp_length == 0):
-            return time_data
-        else:
-            return np.hstack([cyclic_prefix, time_data])        # add them to the beginning
-    
-    
-    # Build Schmidl & Cox Symbols for synchronisation
-    def build_schmidlcox(self):
-        
-        # Map known sequence to symbols
-        symbols = self.map(self.SP(self.known_sequence))
-        
-        # Create all 0 symbol, adds known symbols at all odd bins
-        p = np.zeros(self.K, dtype=complex)
-        p[::2] = symbols[0,:self.K // 2]
-        return p.reshape(-1, self.K)
-
-
+        cyclic_prefix = time_data[:,-self.cp_length:]            # take the last cp samples
+        return np.hstack([cyclic_prefix, time_data])            # add them to the beginning
     
     
     # Prepare data for stream
-    def send_to_stream(self, time_data, sync):
-    
-        known_symbols = self.map(self.SP(self.known_sequence[:self.bits_per_symbol]))   # Map first mu*K bits from known bit sequence to symbols
-        known_time = self.add_cp(np.fft.ifft(self.build_OFDM_symbol(known_symbols)))    # Convert to time domain and add CP
+    def send_to_stream(self, time_data):
         
-        
-        
-        # No packets
-        if(self.packet_length == -1):
-            known_time = np.tile(known_time, (self.no_pilots,1))                        # Tile known data across number of pilot symbols
-            tx_data = np.hstack([known_time, time_data])                                # Add known data to start
-            tx = np.hstack([sync, tx_data.reshape(-1)]).real                            # Make serial and add sync
-            
-            # Create frames for visuals
-            sync_valid = np.zeros(len(tx)); known_valid = np.zeros(len(tx)); payload_valid = np.zeros(len(tx))
-            sync_valid[0:len(sync)] = 1
-            for f in range(self.no_pilots):
-                known_valid[len(sync) + (self.cp_length + self.ofdm_symbol_size) * f + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
-            for f in range(time_data.shape[0]):
-                payload_valid[len(sync) + (self.cp_length + self.ofdm_symbol_size) * (self.no_pilots + f) + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
-            
+        # Convert to serial stream and take real part
+        tx_data = time_data.reshape(-1)
+        tx = tx_data.real
 
-        # Packets
-        else:
-            packets = time_data.reshape(-1, self.packet_length, self.ofdm_symbol_size+self.cp_length) # Reshape data into packets
-            no_packets = packets.shape[0]                                               # Get number of packets in stream
-            known_time = np.tile(known_time, (no_packets,self.no_pilots,1))             # Tile known data across number of pilot symbols and packets
-            sync = np.tile(sync, (no_packets,1))                                        # Tile sync across packets
-            tx_data = np.hstack([known_time, packets, known_time])                      # Add known data to start and end of each packet
-            tx_data = np.hstack([sync, tx_data.reshape(no_packets,-1)])                 # Add sync to each packet
-            tx = tx_data.reshape(-1).real                                               # Shape to serial
+        
+        # Pad with zeros to separate from chirp
+        padding = np.zeros(int(self.gap_length))
+        
+
+        
+        if(self.sync_method == "chirp"):
             
-            # Create frames for visuals
-            frame_length = tx_data.shape[1]
-            sync_valid = np.zeros(frame_length); known_valid = np.zeros(frame_length); payload_valid = np.zeros(frame_length)
-            sync_valid[0:sync.shape[1]] = 1
-            for f in np.hstack([np.arange(self.no_pilots),np.arange(self.no_pilots+self.packet_length,2*self.no_pilots+self.packet_length)]):
-                known_valid[sync.shape[1] + (self.cp_length + self.ofdm_symbol_size) * f * 1 + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
-            for f in range(self.packet_length):
-                payload_valid[sync.shape[1] + (self.cp_length + self.ofdm_symbol_size) * (self.no_pilots + f) + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
-            sync_valid = np.tile(sync_valid,no_packets); known_valid = np.tile(known_valid, no_packets); payload_valid = np.tile(payload_valid, no_packets)
+            # Chirp
+            fsweep = self.sync_chirp()
+            fsweep_reverse = fsweep[::-1]
+            
+            # Add chirp and return
+            if(self.end_sync == True):
+                return np.hstack([fsweep,padding,tx,padding,fsweep_reverse])
+            else:
+                return np.hstack([fsweep,padding,tx])
     
-        return tx, sync_valid, known_valid, payload_valid, no_packets
-    
+        elif(self.sync_method == "schmidlcox"):
+            return np.hstack([padding,tx])
+        
         
     def graphs(self):
     
@@ -222,6 +206,7 @@ class transmitter(CamG):                                # Inherits class attribu
         plt.show()
                 
         
+        # Print output data
     
     # Overall transmit function
     def transmit(self,bits, graph_output=False):
@@ -232,42 +217,39 @@ class transmitter(CamG):                                # Inherits class attribu
         print(self)
         
         bits_padded = self.pad(bits)
-    
         
-        bits_parallel = self.SP(bits_padded)
+        bits_wpilots = self.add_pilots(bits_padded)
+        
+        bits_parallel = self.SP(bits_wpilots)
         constellation = self.map(bits_parallel)
+        
+        # Add Schmidl & Cox Synchronisation
+        if(self.sync_method =="schmidlcox"):
+            
+            if(self.end_sync == True):
+                payload = np.hstack([self.build_schmidlcox, constellation, self.build_schmidlcox])
+            else:
+                payload = np.hstack([self.build_schmidlcox, constellation])
+        
         
         OFDM_symbols = self.build_OFDM_symbol(constellation)
         print("Number of bits to transmit:         " + str(len(bits)))
         print("Number of OFDM symbols to transmit: " + str(OFDM_symbols.shape[0]))
         
-        # Add Synchronisation
-        if(self.sync_method =="schmidlcox"):
-            sync = self.build_schmidlcox()
-
-        elif(self.sync_method == "chirp"):
-            sync = self.sync_chirp()
-        
         time_data = np.fft.ifft(OFDM_symbols)
+
         time_data_cp = self.add_cp(time_data)
         
-        signal, sync_valid, known_valid, payload_valid, no_packets = self.send_to_stream(time_data_cp, sync)
-
-        print("Number of packets to transmit:      " + str(no_packets))
-        
+        signal = self.send_to_stream(time_data_cp)
+    
         if(graph_output == True):
             time = np.linspace(0,len(signal)/self.fs,len(signal))
-            plt.plot(time, signal, label="Signal")
-            plt.plot(time, sync_valid, label="Sync")
-            plt.plot(time, known_valid, label="Known Data")
-            plt.plot(time, payload_valid, label="Payload")
-            plt.title("OFDM Frame")
+            plt.plot(time, signal)
+            plt.title("Signal")
             plt.xlabel("time")
-            plt.legend()
-            plt.savefig("OFDM Frame")
-            plt.show()
-            
-        return signal, sync_valid, known_valid, payload_valid
+            plt.ylabel("Signal")
+        
+        return signal
         
         
         
@@ -277,44 +259,72 @@ class transmitter(CamG):                                # Inherits class attribu
         #########################################
         
 class receiver(transmitter):
-    
-    
-    def chirp_method(self,r):
-        fsweep = self.sync_chirp()[::-1]
-        P = convolve(r, fsweep, mode="full")                # Convolve to find peaks
-        P = P / np.amax(P)                                  # Normalise using max
-        D = np.diff(P)                                      # Differentiate
-        zeros = ((D[:-1] * D[1:]) <= 0) * (P[1:-1] > 0.9)   # Find zero crossings
         
-        # Ignore zeros for chirp_length after first zero
-        for i in range(len(zeros)):
-            if(zeros[i] == 1):
-                for j in range(self.chirp_length):
-                    zeros[i+1+j] = 0
-        return zeros
-        
-        
-    def schmidlcox_method(self,r):
-        # Schmidl & Cox method
-            
-        # Search first 5s
-        search_length = 5 * self.fs
-        d_set = np.arange(0,search_length)
-                
-        # Calculate P using method in the paper
-        P = np.zeros(len(d_set), dtype=complex)
-        for d in d_set[:-1]:
-            P[d+1] = P[d] + r[d+self.L].conj() * r[d+ 2*self.L] - r[d].conj() * r[d+self.L]
-                
-        return np.where(abs(P) == np.amax(abs(P)))[0][0] + self.ofdm_symbol_size - 1
-    
     
     # Get data from audio signal
-    def get_symbols(self,r, zeros):
+    def get_symbols(self,r):
         
-        zero_indicies = np.where(zeros == True)
-
-
+        # Chirp method
+        if(self.sync_method == "chirp"):
+        
+            fsweep = self.sync_chirp()
+            fsweep_reverse = fsweep[::-1]
+            
+            P = convolve(r, fsweep_reverse, mode="full")
+            
+            
+            # Find max index and index of signal start
+            start_index_max = np.where(P == np.amax(P))[0][0]
+            end_index_max = np.where(P_end == np.amax(P_end))[0][0]
+            
+            zero_index = int(1 + start_index_max + self.gap_length)
+            end_index = int(end_index_max + 1 - (self.chirp_length * self.fs + self.gap_length) )
+            
+            if(self.end_sync == True):
+                P_end = convolve(r, fsweep, mode="full")
+                rx = r[zero_index:end_index]
+            else:
+                rx = r[zero_index:]
+                end_index = len(rx) % (self.ofdm_symbol_size + self.cp_length)
+                rx = rx[:-end_index]
+        
+        # Schmidl & Cox method
+        elif(self.sync_method == "schmidlcox"):
+            
+            # Search first 5s
+            search_length = 5 * self.fs
+            d_set = np.arange(0,search_length)
+            
+            # Calculate P using method in the paper
+            P = np.zeros(len(d_set), dtype=complex)
+            for d in d_set[:-1]:
+                P[d+1] = P[d] + r[d+self.L].conj() * r[d+ 2*self.L] - r[d].conj() * r[d+self.L]
+            
+            zero_index = np.where(abs(P) == np.amax(abs(P)))[0][0] + (self.ofdm_symbol_size + self.cp_length)
+            
+            
+            if(self.end_sync == True):
+                # Search last 5s
+                search_length = 5 * self.fs
+                d_set = np.arange(0,search_length)
+                
+                # Calculate Q using method in the paper
+                Q = np.zeros(len(d_set), dtype=complex)
+                for d in d_set[:-1]:
+                    Q[d+1] = Q[d] + r[-(d+self.L)].conj() * r[-(d+ 2*self.L)] - r[-(d)].conj() * r[-(d+self.L)]
+                
+                end_index = np.where(abs(Q) == np.amax(abs(Q)))[0][0] - 1
+            
+                rx = r[zero_index:end_index]
+            
+            else:
+                # Cut off at integer number of symbols
+                rx = r[zero_index:]
+                end_index = len(rx) % (self.ofdm_symbol_size + self.cp_length)
+                rx = rx[:-end_index]
+        
+        else:
+            raise ValueError("Invalid Synchronisation Method")
         
         return rx.reshape(-1,self.cp_length + self.ofdm_symbol_size), P
         
@@ -396,7 +406,7 @@ class receiver(transmitter):
     # Print graphs
     def graphs(self):
         
-        plt.plot(self.data_carriers / self.ofdm_symbol_size * self.fs, abs(self.Hest), label='Estimated channel')
+        plt.plot(self.data_carriers / self.ofdm_symbol_size * self.fs, self.Hest.real, label='Estimated channel')
         plt.ylabel("|H(f)|")
         plt.xlabel("Frequency")
         plt.title("Channel Frequency Response Estimate")
@@ -443,7 +453,7 @@ class receiver(transmitter):
         if(graph_output == True):
             for qam, hard in zip(data_symbols[0,:10], hardDecision[0,:10]):
                 plt.plot([qam.real, hard.real], [qam.imag, hard.imag], 'b-o')
-            plt.plot(hardDecision.real, hardDecision.imag, 'ro')
+                plt.plot(hardDecision.real, hardDecision.imag, 'ro')
             plt.show()
         
         return bits
