@@ -122,10 +122,8 @@ class transmitter(CamG):                                # Inherits class attribu
         return np.array([[self.mapping_table[tuple(b)] for b in bits[i,:]] for i in range(bits.shape[0])])
 
     
-
         
-        
-    # Allocates symbols and pilots, and adds zeros and conjugate to make signal real
+    # Allocates symbols and adds zeros and conjugate to make signal real
     def build_OFDM_symbol(self, payload):
         
         symbols = np.zeros([payload.shape[0],self.ofdm_symbol_size], dtype=complex)     # overall subcarriers in symbols
@@ -181,16 +179,17 @@ class transmitter(CamG):                                # Inherits class attribu
                 known_valid[len(sync) + (self.cp_length + self.ofdm_symbol_size) * f + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
             for f in range(time_data.shape[0]):
                 payload_valid[len(sync) + (self.cp_length + self.ofdm_symbol_size) * (self.no_pilots + f) + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
+            self.no_packets = 1
             
 
         # Packets
         else:
             packets = time_data.reshape(-1, self.packet_length, self.ofdm_symbol_size+self.cp_length) # Reshape data into packets
-            no_packets = packets.shape[0]                                               # Get number of packets in stream
-            known_time = np.tile(known_time, (no_packets,self.no_pilots,1))             # Tile known data across number of pilot symbols and packets
-            sync = np.tile(sync, (no_packets,1))                                        # Tile sync across packets
+            self.no_packets = packets.shape[0]                                          # Get number of packets in stream
+            known_time = np.tile(known_time, (self.no_packets,self.no_pilots,1))        # Tile known data across number of pilot symbols and packets
+            sync = np.tile(sync, (self.no_packets,1))                                   # Tile sync across packets
             tx_data = np.hstack([known_time, packets, known_time])                      # Add known data to start and end of each packet
-            tx_data = np.hstack([sync, tx_data.reshape(no_packets,-1)])                 # Add sync to each packet
+            tx_data = np.hstack([sync, tx_data.reshape(self.no_packets,-1)])                 # Add sync to each packet
             tx = tx_data.reshape(-1).real                                               # Shape to serial
             
             # Create frames for visuals
@@ -201,9 +200,9 @@ class transmitter(CamG):                                # Inherits class attribu
                 known_valid[sync.shape[1] + (self.cp_length + self.ofdm_symbol_size) * f * 1 + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
             for f in range(self.packet_length):
                 payload_valid[sync.shape[1] + (self.cp_length + self.ofdm_symbol_size) * (self.no_pilots + f) + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
-            sync_valid = np.tile(sync_valid,no_packets); known_valid = np.tile(known_valid, no_packets); payload_valid = np.tile(payload_valid, no_packets)
+            sync_valid = np.tile(sync_valid,self.no_packets); known_valid = np.tile(known_valid, self.no_packets); payload_valid = np.tile(payload_valid, self.no_packets)
     
-        return tx, sync_valid, known_valid, payload_valid, no_packets
+        return tx, sync_valid, known_valid, payload_valid
     
         
     def graphs(self):
@@ -251,9 +250,9 @@ class transmitter(CamG):                                # Inherits class attribu
         time_data = np.fft.ifft(OFDM_symbols)
         time_data_cp = self.add_cp(time_data)
         
-        signal, sync_valid, known_valid, payload_valid, no_packets = self.send_to_stream(time_data_cp, sync)
+        signal, sync_valid, known_valid, payload_valid = self.send_to_stream(time_data_cp, sync)
 
-        print("Number of packets to transmit:      " + str(no_packets))
+        print("Number of packets to transmit:      " + str(self.no_packets))
         
         if(graph_output == True):
             time = np.linspace(0,len(signal)/self.fs,len(signal))
@@ -312,16 +311,29 @@ class receiver(transmitter):
     # Get data from audio signal
     def get_symbols(self,r, zeros):
         
-        zero_indicies = np.where(zeros == True)
-
-
+        # Get indicies of sync pulses
+        zero_indicies = np.where(zeros == True)[0]
         
-        return rx.reshape(-1,self.cp_length + self.ofdm_symbol_size), P
+        if(self.packet_length == -1):
+            self.no_packets = 1
+            rx = r[zero_indicies[0]:]
+            end_index = rx % (self.cp_length + self.ofdm_symbol_size)
+            rx = rx[:-end_index]
+            return rx.reshape(1, -1, self.cp_length + self.ofdm_symbol_size)
+        
+        else:
+            self.no_packets = len(zero_indicies)
+            
+            # Extract the data and pilots from each packet
+            rx = np.vstack((r[i:i + (2*self.no_pilots + self.packet_length) * (self.cp_length + self.ofdm_symbol_size)] for i in zero_indicies))
+            
+            # Return packets shaped into symbols + CP's
+            return rx.reshape(-1, 2*self.no_pilots + self.packet_length, self.cp_length + self.ofdm_symbol_size)
         
     
     # Remove the cyclic prefix
     def remove_cp(self, rx):
-        return rx[:,self.cp_length:]
+        return rx[:,:,self.cp_length:]
         
     
     # Separate data and pilot carriers
@@ -330,40 +342,45 @@ class receiver(transmitter):
         # Extract pilot symbols
         if(self.no_pilots == 0):
             pilots = np.array([])
-            data = OFDM_symbols[:,self.data_carriers]
+            data_symbols = OFDM_symbols[:,:,self.data_carriers]
             
         else:
-            pilots = OFDM_symbols[:self.no_pilots,self.data_carriers]
-            data = OFDM_symbols[self.no_pilots:,self.data_carriers]
-        return data, pilots
+            start_pilots = OFDM_symbols[:,:self.no_pilots, self.data_carriers]
+            end_pilots = OFDM_symbols[:,-self.no_pilots:, self.data_carriers]
+            data_symbols = OFDM_symbols[:,self.no_pilots:-self.no_pilots,self.data_carriers]
+        return data_symbols, start_pilots, end_pilots
     
     
-    # Calculate channel estimate from pilot carriers
-    def channel_est(self, pilots):
+    # Calculate channel estimate from pilot carriers and equalise
+    def equalise(self, data_symbols, start_pilots, end_pilots):
 
-        if(pilots.size == 0):
-            pass
+        if(self.no_pilots == 0):
+            return data_symbols.reshape(-1,self.K)
         
         else:
             # Map known pilot sequence onto values
-            pilot_values = self.map(self.SP(self.pilot_sequence))
-            print
-            # Take average over pilot values
-            pilot_avg = np.zeros(self.K, dtype=complex)
+            known_symbols = self.map(self.SP(self.known_sequence[:self.bits_per_symbol]))
             
-            for i in range(0,pilots.shape[1]):
-                pilot_avg.real[i] = np.mean(pilots[:,i].real)
-                pilot_avg.imag[i] = np.mean(pilots[:,i].imag)
+            # Setup arrays for moving Hest
+            Hest_mag = np.zeros((self.no_packets,self.K), dtype=complex)
+            th0 = np.zeros((self.no_packets,self.K), dtype=complex)
+            th1 = np.zeros((self.no_packets,self.K), dtype=complex)
             
-            # Find Hest
-            self.Hest = np.reshape(pilot_avg / pilot_values, -1)
+            # Get magnitude and phase seperately
+            for i in range(self.no_packets):
+                for k in range(self.K):
+                    Hest_mag[i,k] = np.mean(abs(start_pilots[i,:,k])) / abs(known_symbols[0,k])
+                    th0[i,k] = np.mean(np.angle(start_pilots[i,:,k])) / np.angle(known_symbols[0,k])   # Phase at start
+                    th1[i,k] = np.mean(np.angle(end_pilots[i,:,k])) / np.angle(known_symbols[0,k])     # Phase at end
+                    
             
-        return self.Hest
-        
-        
-    # Equalise data carriers from channel measurements
-    def equalise(self, data_symbols):
-        return data_symbols / self.Hest
+            # Equalise data carriers from measurements
+            for i in range(self.no_packets):                                          # Iterate over packets
+                for j in range(self.packet_length):                                   # Iterate over symbols in packet
+                    # Equalise magnitude using initial hest and phase using linear phase interpolation
+                    data_symbols[i,j] = data_symbols[i,j] / Hest_mag[i] * np.exp(-1j * (th0[i] + j*(th1[i]-th0[i])/self.packet_length))
+            
+        return data_symbols.reshape(-1,self.K)
     
     
     # De-map the constellation symbol to bits using min distance
@@ -420,20 +437,21 @@ class receiver(transmitter):
         print("OFDM Paramters:")
         print(self)
         
-        rx_signal_cp, start_sync_signal = self.get_symbols(signal)
+        zeros = self.chirp_method(signal)
+        
+        rx_signal_cp = self.get_symbols(signal,zeros)
         
         rx_signal = self.remove_cp(rx_signal_cp)
         
-        print("Number of received OFDM symbols:    " + str(len(rx_signal)))
-        
         OFDM_symbols = np.fft.fft(rx_signal)
+        print(OFDM_symbols)
+        data_symbols, start_pilots, end_pilots = self.get_data(OFDM_symbols)
+        
+        print("Number of received OFDM symbols:    " + str(self.no_packets * self.packet_length))
+        
+        #data_symbols = self.equalise(data_symbols, start_pilots, end_pilots)
+        data_symbols = data_symbols.reshape(-1,self.K)
 
-        data, pilots = self.get_data(OFDM_symbols)
-        
-        Hest = self.channel_est(pilots)
-        
-        data_symbols = self.equalise(data)
-        
         bits_parallel, hardDecision = self.demap(data_symbols)
         
         bits = self.PS(bits_parallel)
@@ -441,9 +459,20 @@ class receiver(transmitter):
         print("Number of received bits:            " + str(len(bits)))
         
         if(graph_output == True):
-            for qam, hard in zip(data_symbols[0,:10], hardDecision[0,:10]):
+            for j in range(100):
+                plt.plot(data_symbols[0,j].real, data_symbols[0,j].imag, 'bo')
+            for b1 in [0, 1]:
+                for b0 in [0, 1]:
+                    B = (b1, b0)
+                    Q = self.mapping_table[B]
+                    plt.plot(Q.real, Q.imag, 'ro')
+            
+            plt.show()
+            
+        if(False == True):
+            for qam, hard in zip(data_symbols[0,::64], hardDecision[0,::64]):
                 plt.plot([qam.real, hard.real], [qam.imag, hard.imag], 'b-o')
-            plt.plot(hardDecision.real, hardDecision.imag, 'ro')
+                plt.plot(hardDecision.real, hardDecision.imag, 'ro')
             plt.show()
         
         return bits
@@ -495,7 +524,8 @@ class channel(receiver):
         print(self)
     
         # Set pilots to 0
-        self.P = 0
+        self.no_pilots = 0
+        self.packet_length = -1
         
         # Transmit signal
         bits_padded = self.pad(bits)
