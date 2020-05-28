@@ -77,7 +77,7 @@ class CamG:
     def sync_chirp(self):
             
         t = np.linspace(0, self.chirp_length/self.fs, self.chirp_length)
-        return chirp(t, f0=self.f0, f1=self.f1, t1=self.chirp_length/self.fs, method='linear')
+        return chirp(t, f0=self.f0, f1=self.f1, t1=self.chirp_length/self.fs, method='linear') / 10
         
             
             
@@ -169,7 +169,7 @@ class transmitter(CamG):                                # Inherits class attribu
         # No packets
         if(self.packet_length == -1):
             known_time = np.tile(known_time, (self.no_pilots,1))                        # Tile known data across number of pilot symbols
-            tx_data = np.hstack([known_time, time_data])                                # Add known data to start
+            tx_data = np.hstack([known_time, time_data, known_time])                                # Add known data to start and end
             tx = np.hstack([sync, tx_data.reshape(-1)]).real                            # Make serial and add sync
             
             # Create frames for visuals
@@ -187,6 +187,7 @@ class transmitter(CamG):                                # Inherits class attribu
             packets = time_data.reshape(-1, self.packet_length, self.ofdm_symbol_size+self.cp_length) # Reshape data into packets
             self.no_packets = packets.shape[0]                                          # Get number of packets in stream
             known_time = np.tile(known_time, (self.no_packets,self.no_pilots,1))        # Tile known data across number of pilot symbols and packets
+            
             sync = np.tile(sync, (self.no_packets,1))                                   # Tile sync across packets
             tx_data = np.hstack([known_time, packets, known_time])                      # Add known data to start and end of each packet
             tx_data = np.hstack([sync, tx_data.reshape(self.no_packets,-1)])                 # Add sync to each packet
@@ -283,16 +284,18 @@ class receiver(transmitter):
         P = convolve(r, fsweep, mode="full")                # Convolve to find peaks
         P = P / np.amax(P)                                  # Normalise using max
         D = np.diff(P)                                      # Differentiate
-        zeros = ((D[:-1] * D[1:]) <= 0) * (P[1:-1] > 0.9)   # Find zero crossings
-        
-        # Ignore zeros for chirp_length after first zero
+        zeros = ((D[:-1] * D[1:]) <= 0) * (P[1:-1] > 0.8)   # Find zero crossings
+
+
         for i in range(len(zeros)):
             if(zeros[i] == 1):
                 for j in range(self.chirp_length):
                     zeros[i+1+j] = 0
-        return zeros
+        # Shift forward by two for start of signal
+        return np.hstack([zeros[-2:],zeros[:-2]])
         
         
+######## Not used
     def schmidlcox_method(self,r):
         # Schmidl & Cox method
             
@@ -306,7 +309,7 @@ class receiver(transmitter):
             P[d+1] = P[d] + r[d+self.L].conj() * r[d+ 2*self.L] - r[d].conj() * r[d+self.L]
                 
         return np.where(abs(P) == np.amax(abs(P)))[0][0] + self.ofdm_symbol_size - 1
-    
+ #########
     
     # Get data from audio signal
     def get_symbols(self,r, zeros):
@@ -317,8 +320,9 @@ class receiver(transmitter):
         if(self.packet_length == -1):
             self.no_packets = 1
             rx = r[zero_indicies[0]:]
-            end_index = rx % (self.cp_length + self.ofdm_symbol_size)
-            rx = rx[:-end_index]
+            end_index = len(rx) % (self.cp_length + self.ofdm_symbol_size)
+            if(end_index > 0):
+                rx = rx[:-end_index]
             return rx.reshape(1, -1, self.cp_length + self.ofdm_symbol_size)
         
         else:
@@ -363,8 +367,11 @@ class receiver(transmitter):
             
             # Setup arrays for moving Hest
             Hest_mag = np.zeros((self.no_packets,self.K), dtype=complex)
-            th0 = np.zeros((self.no_packets,self.K), dtype=complex)
-            th1 = np.zeros((self.no_packets,self.K), dtype=complex)
+            th0 = np.zeros((self.no_packets,self.K))
+            th1 = np.zeros((self.no_packets,self.K))
+            
+            # Setup array for equalised data
+            data_eq = np.zeros_like(data_symbols)
             
             # Get magnitude and phase seperately
             for i in range(self.no_packets):
@@ -373,14 +380,38 @@ class receiver(transmitter):
                     th0[i,k] = np.mean(np.angle(start_pilots[i,:,k])) / np.angle(known_symbols[0,k])   # Phase at start
                     th1[i,k] = np.mean(np.angle(end_pilots[i,:,k])) / np.angle(known_symbols[0,k])     # Phase at end
                     
+            # Take average over pilot values
+            Hest_start = np.zeros((self.no_packets,self.K), dtype=complex)
+            Hest_end = np.zeros((self.no_packets,self.K), dtype=complex)
             
-            # Equalise data carriers from measurements
-            for i in range(self.no_packets):                                          # Iterate over packets
-                for j in range(self.packet_length):                                   # Iterate over symbols in packet
-                    # Equalise magnitude using initial hest and phase using linear phase interpolation
-                    data_symbols[i,j] = data_symbols[i,j] / Hest_mag[i] * np.exp(-1j * (th0[i] + j*(th1[i]-th0[i])/self.packet_length))
+            for i in range(self.no_packets):
+                for k in range(self.K):
+                    Hest_start.real[i,k] = np.mean(start_pilots[i,:,k].real)
+                    Hest_start.imag[i,k] = np.mean(start_pilots[i,:,k].imag)
+                    Hest_end.real[i,k] = np.mean(end_pilots[i,:,k].real)
+                    Hest_end.imag[i,k] = np.mean(end_pilots[i,:,k].imag)
+                Hest_start[i] = Hest_start[i] / known_symbols
+                Hest_end[i] = Hest_end[i] / known_symbols
             
-        return data_symbols.reshape(-1,self.K)
+            Hest_mag = abs(Hest_start)
+            th0 = np.angle(Hest_start)
+            th1 = np.angle(Hest_end)
+            
+
+            if(self.packet_length == -1):
+                for j in range(data_symbols.shape[1]):
+                    data_eq[0,j] = data_symbols[0,j] / Hest
+                
+                    
+            else:
+                # Equalise data carriers from measurements
+                for i in range(self.no_packets):                                          # Iterate over packets
+                    for l in range(self.packet_length):                                   # Iterate over symbols in packet
+                        for n in range(self.K):
+                            # Equalise magnitude using initial hest and phase using linear phase interpolation
+                            data_eq[i,l,n] = data_symbols[i,l,n] / (Hest_mag[i,n] * np.exp(1j * ((n*l/self.K) * (th1[i,n]-th0[i,n]) / self.packet_length + th0[i,n])))
+                        
+        return data_eq.reshape(-1,self.K), Hest_start, Hest_end
     
     
     # De-map the constellation symbol to bits using min distance
@@ -411,15 +442,22 @@ class receiver(transmitter):
     # Print symbol mapping
     
     # Print graphs
-    def graphs(self):
+    def graphs(self, Hest):
         
-        plt.plot(self.data_carriers / self.ofdm_symbol_size * self.fs, abs(self.Hest), label='Estimated channel')
+        plt.plot(self.data_carriers / self.ofdm_symbol_size * self.fs, abs(Hest[0]), label='Estimated channel')
         plt.ylabel("|H(f)|")
         plt.xlabel("Frequency")
         plt.title("Channel Frequency Response Estimate")
         plt.show()
         
-        h = np.fft.ifft(self.Hest)
+        plt.plot(self.data_carriers / self.ofdm_symbol_size * self.fs, np.angle(Hest[0]), label='Estimated channel')
+        plt.ylabel("arg(H(f))")
+        plt.xlabel("Frequency")
+        plt.title("Channel Frequency Response Estimate")
+        plt.show()
+        
+        
+        h = np.fft.ifft(Hest[0])
         time = np.linspace(0,(len(h)), len(h))
         plt.plot(time[:100],h.real[:100])
         plt.title("Channel Impulse Response")
@@ -444,13 +482,13 @@ class receiver(transmitter):
         rx_signal = self.remove_cp(rx_signal_cp)
         
         OFDM_symbols = np.fft.fft(rx_signal)
-        print(OFDM_symbols)
+
         data_symbols, start_pilots, end_pilots = self.get_data(OFDM_symbols)
         
         print("Number of received OFDM symbols:    " + str(self.no_packets * self.packet_length))
         
-        #data_symbols = self.equalise(data_symbols, start_pilots, end_pilots)
-        data_symbols = data_symbols.reshape(-1,self.K)
+        data_symbols, Hest_start, Hest_end = self.equalise(data_symbols, start_pilots, end_pilots)
+        #data_symbols = data_symbols.reshape(-1,self.K)
 
         bits_parallel, hardDecision = self.demap(data_symbols)
         
@@ -459,23 +497,18 @@ class receiver(transmitter):
         print("Number of received bits:            " + str(len(bits)))
         
         if(graph_output == True):
-            for j in range(100):
-                plt.plot(data_symbols[0,j].real, data_symbols[0,j].imag, 'bo')
+            for j in range(self.K):
+                plt.plot(data_symbols[9,j].real, data_symbols[9,j].imag, 'bo')
             for b1 in [0, 1]:
                 for b0 in [0, 1]:
                     B = (b1, b0)
                     Q = self.mapping_table[B]
                     plt.plot(Q.real, Q.imag, 'ro')
-            
-            plt.show()
-            
-        if(False == True):
-            for qam, hard in zip(data_symbols[0,::64], hardDecision[0,::64]):
-                plt.plot([qam.real, hard.real], [qam.imag, hard.imag], 'b-o')
-                plt.plot(hardDecision.real, hardDecision.imag, 'ro')
+            plt.axis(True)
             plt.show()
         
-        return bits
+        
+        return bits, Hest_start, Hest_end
         
             
             
