@@ -337,7 +337,7 @@ class receiver(transmitter):
     
     # Remove the cyclic prefix
     def remove_cp(self, rx):
-        return rx[:,:,self.cp_length:]
+        return rx[:,:,-self.ofdm_symbol_size:]
         
     
     # Separate data and pilot carriers
@@ -394,20 +394,15 @@ class receiver(transmitter):
             p = np.zeros(self.no_packets)                                        # Initialise array for gradient of phase difference at each packet
             for i in range(self.no_packets):
                 p[i] = np.polyfit(np.arange(len(phase_diff[i,300:-1000])),phase_diff[i,300:-1000],1)[0]
-            
-
-            if(self.packet_length == -1):
-                for j in range(data_symbols.shape[1]):
-                    data_eq[0,j] = data_symbols[0,j] / Hest
+            print(p)
                 
-                    
-            else:
-                # Equalise data carriers from measurements
-                for i in range(self.no_packets):                                          # Iterate over packets
-                    for l in range(self.packet_length):                                   # Iterate over symbols in packet
-                        for n in range(self.K):
-                            # Equalise magnitude using initial hest and phase using linear phase interpolation
-                            data_eq[i,l,n] = data_symbols[i,l,n] / (Hest_mag[i,n] * np.exp(1j*(p[i]*n*l/self.K + phase0[i,n])))
+
+            # Equalise data carriers from measurements
+            for i in range(self.no_packets):                                          # Iterate over packets
+                for l in range(self.packet_length):                                   # Iterate over symbols in packet
+                    for n in range(self.K):
+                        # Equalise magnitude using initial hest and phase using linear phase interpolation
+                        data_eq[i,l,n] = data_symbols[i,l,n] / (Hest_mag[i,n] * np.exp(1j*(p[i]*n*l/self.K + phase0[i,n])))
                         
         return data_eq.reshape(-1,self.K), Hest_start, Hest_end
     
@@ -495,15 +490,16 @@ class receiver(transmitter):
         print("Number of received bits:            " + str(len(bits)))
         
         if(graph_output == True):
-            for i in range(self.packet_length):
-                for j in range(self.K):
+            for i in range(2):
+                for j in range(1500,self.K):
                     plt.plot(data_symbols[i,j].real, data_symbols[i,j].imag, 'bo')
             for b1 in [0, 1]:
                 for b0 in [0, 1]:
                     B = (b1, b0)
                     Q = self.mapping_table[B]
                     plt.plot(Q.real, Q.imag, 'ro')
-            plt.axis(True)
+            plt.xlim(-10,10)
+            plt.ylim(-10,10)
             plt.show()
         
         
