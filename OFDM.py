@@ -372,13 +372,6 @@ class receiver(transmitter):
             
             # Setup array for equalised data
             data_eq = np.zeros_like(data_symbols)
-            
-            # Get magnitude and phase seperately
-            for i in range(self.no_packets):
-                for k in range(self.K):
-                    Hest_mag[i,k] = np.mean(abs(start_pilots[i,:,k])) / abs(known_symbols[0,k])
-                    th0[i,k] = np.mean(np.angle(start_pilots[i,:,k])) / np.angle(known_symbols[0,k])   # Phase at start
-                    th1[i,k] = np.mean(np.angle(end_pilots[i,:,k])) / np.angle(known_symbols[0,k])     # Phase at end
                     
             # Take average over pilot values
             Hest_start = np.zeros((self.no_packets,self.K), dtype=complex)
@@ -394,8 +387,13 @@ class receiver(transmitter):
                 Hest_end[i] = Hest_end[i] / known_symbols
             
             Hest_mag = abs(Hest_start)
-            th0 = np.angle(Hest_start)
-            th1 = np.angle(Hest_end)
+            phase0 = np.angle(Hest_start)                  # Phase at start
+            phase1 = np.angle(Hest_end)                     # Phase at end
+            
+            phase_diff = np.unwrap(phase1) - np.unwrap(phase0)                   # Phase difference
+            p = np.zeros(self.no_packets)                                        # Initialise array for gradient of phase difference at each packet
+            for i in range(self.no_packets):
+                p[i] = np.polyfit(np.arange(len(phase_diff[i,300:-1000])),phase_diff[i,300:-1000],1)[0]
             
 
             if(self.packet_length == -1):
@@ -409,7 +407,7 @@ class receiver(transmitter):
                     for l in range(self.packet_length):                                   # Iterate over symbols in packet
                         for n in range(self.K):
                             # Equalise magnitude using initial hest and phase using linear phase interpolation
-                            data_eq[i,l,n] = data_symbols[i,l,n] / (Hest_mag[i,n] * np.exp(1j * ((n*l/self.K) * (th1[i,n]-th0[i,n]) / self.packet_length + th0[i,n])))
+                            data_eq[i,l,n] = data_symbols[i,l,n] / (Hest_mag[i,n] * np.exp(1j*(p[i]*n*l/self.K + phase0[i,n])))
                         
         return data_eq.reshape(-1,self.K), Hest_start, Hest_end
     
@@ -497,8 +495,9 @@ class receiver(transmitter):
         print("Number of received bits:            " + str(len(bits)))
         
         if(graph_output == True):
-            for j in range(self.K):
-                plt.plot(data_symbols[9,j].real, data_symbols[9,j].imag, 'bo')
+            for i in range(self.packet_length):
+                for j in range(self.K):
+                    plt.plot(data_symbols[i,j].real, data_symbols[i,j].imag, 'bo')
             for b1 in [0, 1]:
                 for b0 in [0, 1]:
                     B = (b1, b0)
