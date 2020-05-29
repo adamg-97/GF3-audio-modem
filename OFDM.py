@@ -15,31 +15,38 @@ from IPython.display import Audio
 #########################################
 
 class CamG:
-    def __init__(self, mode, known_sequence=np.array([]), no_pilots=10, packet_length=180):
+    def __init__(self, mode, no_pilots=10, packet_length=180, bin_mode=1):
     
         # Audio params
-        self.fs = 48000                                # Audio sampling rate
+        self.fs = 48000                                                             # Audio sampling rate
     
         # OFDM params
-        self.ofdm_symbol_size = 4096                # OFDM symbol size
-        self.K = self.ofdm_symbol_size // 2 - 1     # Number of carriers in OFDM symbol i.e. DFT size / 2 - 1
-        self.data_carriers = np.arange(1,self.K+1)  # indicies of subcarriers [1... K+1]
-        self.packet_length = packet_length          # Number of OFDM data symbols in a packet
-        self.no_pilots = no_pilots                  # Number of pilot symbols preceeding and following data
-        self.known_sequence = known_sequence        # Known values of the pilot symbols to transmit before data
+        self.ofdm_symbol_size = 4096                                                # OFDM symbol size
+        
+        bin_modes = [(0,self.ofdm_symbol_size // 2 - 1),(100,1500)]
+        self.lowest_bin = bin_modes[bin_mode][0]                                    # Set lowest active freq bin
+        self.highest_bin = bin_modes[bin_mode][1]                                   # Set highest active freq bin
+        self.K = self.ofdm_symbol_size // 2 - 1                                     # Number of carriers in OFDM symbol i.e. DFT size / 2 - 1
+        self.carriers = np.arange(1,self.K+1)                                       # indicies of subcarriers [1... K+1]
+        self.data_carriers = np.arange(self.lowest_bin,self.highest_bin)            # Pick out data carriers
+        self.data_carriers_per_symbol = len(self.data_carriers)                     # Number of turned on data carriers per OFDM symbol
+        self.unused_carriers = np.delete(self.carriers, (self.data_carriers-1))     # Unused carriers
+        self.packet_length = packet_length                                          # Number of OFDM data symbols in a packet
+        self.no_pilots = no_pilots                                                  # Number of pilot symbols preceeding and following data
+        self.known_sequence = np.array([])                                        # Known values of the pilot symbols to transmit before data
         
         cp_modes = [224, 704, 1184]
-        self.cp_length = cp_modes[mode-1]           # length of cyclic prefix based on mode
+        self.cp_length = cp_modes[mode-1]                                           # length of cyclic prefix based on mode
  
         # Sync params
-        self.sync_method = "chirp"                  # Synchronisation method
+        self.sync_method = "chirp"                                                  # Synchronisation method
         
         # Schmidl & Cox Params
-        self.L = self.K + 1                         # Preamble size - note this is the number of actual OFDM carriers K + zero frequency
+        self.L = self.K + 1                                                         # Preamble size - note this is the number of actual OFDM carriers K + zero frequency
         
         # Chirp params
-        self.f0 = 2000                                                  # Chirp start frequency
-        self.f1 = 4000                                                  # Chirp finish frequency
+        self.f0 = 0                                                     # Chirp start frequency
+        self.f1 = 8000                                                  # Chirp finish frequency
         self.chirp_length = 5*(self.ofdm_symbol_size + self.cp_length)  # Chirp time
 
 
@@ -70,16 +77,23 @@ class CamG:
             raise ValueError("Invalid Modulation Type")
             
         
-        self.bits_per_symbol = len(self.data_carriers) * self.mu    # Bits per OFDM symbol
+        self.data_bits_per_symbol = self.data_carriers_per_symbol * self.mu    # Data bits per OFDM symbol
+        self.bits_per_symbol = self.K * self.mu                                # Total bits per OFDM symbol
+        
+        
+        # Get known sequence
+        with open("handouts/random_bits.txt", mode='rb') as f:
+            for i in range(self.ofdm_symbol_size):
+                self.known_sequence = np.append(self.known_sequence, int(f.read(1)))
+        
         
         
     # Create chirp for synchronisation
     def sync_chirp(self):
             
         t = np.linspace(0, self.chirp_length/self.fs, self.chirp_length)
-        return chirp(t, f0=self.f0, f1=self.f1, t1=self.chirp_length/self.fs, method='linear') / 10
+        return chirp(t, f0=self.f0, f1=self.f1, t1=self.chirp_length/self.fs, method='linear') / 10         # Reduce amplitude of chirp to save ears!
         
-            
             
     # Prints out key OFDM attributes
     def __repr__(self):
@@ -98,14 +112,10 @@ class transmitter(CamG):                                # Inherits class attribu
     # Pad bits with zeros to right length for symbols and packets
     def pad(self,bits):
     
-        # Pad to integer number of symbols
-        if(self.packet_length == -1):
-            padding_length = (self.bits_per_symbol - len(bits) % self.bits_per_symbol) % self.bits_per_symbol
-            
+    
         # Pad to integer number of packets
-        else:
-            bits_per_packet = self.bits_per_symbol * self.packet_length
-            padding_length = (bits_per_packet - len(bits) % bits_per_packet) % bits_per_packet
+        bits_per_packet = self.data_bits_per_symbol * self.packet_length
+        padding_length = (bits_per_packet - len(bits) % bits_per_packet) % bits_per_packet
             
         # Pad with random data - packing with zeros is bad
         padding = np.random.binomial(n=1, p=0.5, size=(padding_length,))
@@ -114,7 +124,7 @@ class transmitter(CamG):                                # Inherits class attribu
     
     # Shapes serial bits into parallel stream for OFDM
     def SP(self, bits):
-        return bits.reshape(-1,self.K, self.mu)
+        return bits.reshape(-1,self.data_carriers_per_symbol, self.mu)
         
 
     # Maps the bits to symbols
@@ -122,15 +132,22 @@ class transmitter(CamG):                                # Inherits class attribu
         return np.array([[self.mapping_table[tuple(b)] for b in bits[i,:]] for i in range(bits.shape[0])])
 
     
+    # Generate random QPSK symbols
+    def random_qpsk(self):
+        qpsk = np.array([1+1j, 1-1j, -1+1j, -1-1j]) / np.sqrt(2)
+        return np.random.choice(qpsk, size=(self.K - self.data_carriers_per_symbol), replace=True)
+        
         
     # Allocates symbols and adds zeros and conjugate to make signal real
     def build_OFDM_symbol(self, payload):
         
         symbols = np.zeros([payload.shape[0],self.ofdm_symbol_size], dtype=complex)     # overall subcarriers in symbols
-        
+        rand_qpsk = self.random_qpsk()
         # Allocate data carriers
         symbols[:,self.data_carriers] = payload
+        symbols[:,self.unused_carriers] = rand_qpsk
         symbols[:,-self.data_carriers] = np.conj(payload)
+        symbols[:,-self.unused_carriers] = np.conj(rand_qpsk)
         
         return symbols
         
@@ -160,9 +177,12 @@ class transmitter(CamG):                                # Inherits class attribu
     
     # Prepare data for stream
     def send_to_stream(self, time_data, sync):
-    
-        known_symbols = self.map(self.SP(self.known_sequence[:self.bits_per_symbol]))   # Map first mu*K bits from known bit sequence to symbols
-        known_time = self.add_cp(np.fft.ifft(self.build_OFDM_symbol(known_symbols)))    # Convert to time domain and add CP
+        
+        known_symbols = self.map(self.known_sequence[:self.bits_per_symbol].reshape(-1,self.K, self.mu))   # Map first mu*K bits from known bit sequence to symbols
+        known_ofdm = np.zeros([1,self.ofdm_symbol_size], dtype=complex)
+        known_ofdm[0,self.carriers] = known_symbols
+        known_ofdm[0,-self.carriers] = np.conj(known_symbols)
+        known_time = self.add_cp(np.fft.ifft(known_ofdm))                               # Convert to time domain and add CP
         
         
         
@@ -292,7 +312,7 @@ class receiver(transmitter):
                 for j in range(self.chirp_length):
                     zeros[i+1+j] = 0
         # Shift forward by two for start of signal
-        return np.hstack([zeros[-2:],zeros[:-2]])
+        return zeros
         
         
 ######## Not used
@@ -315,8 +335,9 @@ class receiver(transmitter):
     def get_symbols(self,r, zeros):
         
         # Get indicies of sync pulses
-        zero_indicies = np.where(zeros == True)[0]
+        zero_indicies = np.where(zeros == True)[0] + 2                  # Shift by two to get actual start of data
         
+        #######
         if(self.packet_length == -1):
             self.no_packets = 1
             rx = r[zero_indicies[0]:]
@@ -324,6 +345,7 @@ class receiver(transmitter):
             if(end_index > 0):
                 rx = rx[:-end_index]
             return rx.reshape(1, -1, self.cp_length + self.ofdm_symbol_size)
+        #######
         
         else:
             self.no_packets = len(zero_indicies)
@@ -337,7 +359,7 @@ class receiver(transmitter):
     
     # Remove the cyclic prefix
     def remove_cp(self, rx):
-        return rx[:,:,-self.ofdm_symbol_size:]
+        return rx[:,:,self.cp_length:]
         
     
     # Separate data and pilot carriers
@@ -346,12 +368,12 @@ class receiver(transmitter):
         # Extract pilot symbols
         if(self.no_pilots == 0):
             pilots = np.array([])
-            data_symbols = OFDM_symbols[:,:,self.data_carriers]
+            data_symbols = OFDM_symbols[:,:,self.carriers]
             
         else:
-            start_pilots = OFDM_symbols[:,:self.no_pilots, self.data_carriers]
-            end_pilots = OFDM_symbols[:,-self.no_pilots:, self.data_carriers]
-            data_symbols = OFDM_symbols[:,self.no_pilots:-self.no_pilots,self.data_carriers]
+            start_pilots = OFDM_symbols[:,:self.no_pilots, self.carriers]
+            end_pilots = OFDM_symbols[:,-self.no_pilots:, self.carriers]
+            data_symbols = OFDM_symbols[:,self.no_pilots:-self.no_pilots,self.carriers]
         return data_symbols, start_pilots, end_pilots
     
     
@@ -363,7 +385,7 @@ class receiver(transmitter):
         
         else:
             # Map known pilot sequence onto values
-            known_symbols = self.map(self.SP(self.known_sequence[:self.bits_per_symbol]))
+            known_symbols = self.map(self.known_sequence[:self.bits_per_symbol].reshape(-1,self.K, self.mu))
             
             # Setup arrays for moving Hest
             Hest_mag = np.zeros((self.no_packets,self.K), dtype=complex)
@@ -372,6 +394,7 @@ class receiver(transmitter):
             
             # Setup array for equalised data
             data_eq = np.zeros_like(data_symbols)
+            Hest = np.zeros_like(data_symbols)
                     
             # Take average over pilot values
             Hest_start = np.zeros((self.no_packets,self.K), dtype=complex)
@@ -388,13 +411,12 @@ class receiver(transmitter):
             
             Hest_mag = abs(Hest_start)
             phase0 = np.angle(Hest_start)                  # Phase at start
-            phase1 = np.angle(Hest_end)                     # Phase at end
+            phase1 = np.angle(Hest_end)                    # Phase at end
             
             phase_diff = np.unwrap(phase1) - np.unwrap(phase0)                   # Phase difference
             p = np.zeros(self.no_packets)                                        # Initialise array for gradient of phase difference at each packet
             for i in range(self.no_packets):
-                p[i] = np.polyfit(np.arange(len(phase_diff[i,300:-1000])),phase_diff[i,300:-1000],1)[0]
-            print(p)
+                p[i] = np.polyfit(np.arange(len(phase_diff[i,100:1500])),phase_diff[i,100:1500],1)[0]
                 
 
             # Equalise data carriers from measurements
@@ -402,8 +424,19 @@ class receiver(transmitter):
                 for l in range(self.packet_length):                                   # Iterate over symbols in packet
                     for n in range(self.K):
                         # Equalise magnitude using initial hest and phase using linear phase interpolation
-                        data_eq[i,l,n] = data_symbols[i,l,n] / (Hest_mag[i,n] * np.exp(1j*(p[i]*n*l/self.K + phase0[i,n])))
-                        
+                        Hest[i,l,n] = Hest_start[i,n] * np.exp(1j * (p[i]*n*(l + self.no_pilots/2) / (self.packet_length)))
+                        data_eq[i,l,n] = data_symbols[i,l,n] / Hest[i,l,n]
+            
+            x = np.linspace(0,self.fs*self.K/self.ofdm_symbol_size,self.K)
+            for i in np.arange(self.packet_length)[::10]:
+                plt.plot(x,np.unwrap(np.angle(Hest[0,i,:])))
+            plt.plot(x,np.unwrap(np.angle(Hest_end[0,:])), color="blue", label="Phase at End of Packet")
+            plt.plot(x,np.unwrap(np.angle(Hest_start[0,:])), color="red",label="Phase at Start of Packet")
+            plt.legend()
+            plt.xlabel("Frequency")
+            plt.ylabel("Phase Shift")
+            plt.show()
+            
         return data_eq.reshape(-1,self.K), Hest_start, Hest_end
     
     
@@ -437,13 +470,13 @@ class receiver(transmitter):
     # Print graphs
     def graphs(self, Hest):
         
-        plt.plot(self.data_carriers / self.ofdm_symbol_size * self.fs, abs(Hest[0]), label='Estimated channel')
+        plt.plot(self.carriers / self.ofdm_symbol_size * self.fs, abs(Hest[0]), label='Estimated channel')
         plt.ylabel("|H(f)|")
         plt.xlabel("Frequency")
         plt.title("Channel Frequency Response Estimate")
         plt.show()
         
-        plt.plot(self.data_carriers / self.ofdm_symbol_size * self.fs, np.angle(Hest[0]), label='Estimated channel')
+        plt.plot(self.carriers / self.ofdm_symbol_size * self.fs, np.angle(Hest[0]), label='Estimated channel')
         plt.ylabel("arg(H(f))")
         plt.xlabel("Frequency")
         plt.title("Channel Frequency Response Estimate")
@@ -481,29 +514,33 @@ class receiver(transmitter):
         print("Number of received OFDM symbols:    " + str(self.no_packets * self.packet_length))
         
         data_symbols, Hest_start, Hest_end = self.equalise(data_symbols, start_pilots, end_pilots)
-        #data_symbols = data_symbols.reshape(-1,self.K)
+        
+        
+        # Extract data symbols and throw away unused carriers: data_carriers -1 as 0 frequency already removed
+        data_symbols = data_symbols[:,self.data_carriers -1]
 
         bits_parallel, hardDecision = self.demap(data_symbols)
-        
+
         bits = self.PS(bits_parallel)
         
         print("Number of received bits:            " + str(len(bits)))
         
         if(graph_output == True):
-            for i in range(2):
-                for j in range(1500,self.K):
-                    plt.plot(data_symbols[i,j].real, data_symbols[i,j].imag, 'bo')
+            #for i in range(2):
+            for j in range(1400):
+                plt.plot(data_symbols[0,j].real, data_symbols[0,j].imag, 'bo')
+                plt.plot(data_symbols[179,j].real, data_symbols[179,j].imag, 'go')
             for b1 in [0, 1]:
                 for b0 in [0, 1]:
                     B = (b1, b0)
                     Q = self.mapping_table[B]
                     plt.plot(Q.real, Q.imag, 'ro')
-            plt.xlim(-10,10)
-            plt.ylim(-10,10)
+            plt.xlim(-5,5)
+            plt.ylim(-5,5)
             plt.show()
         
         
-        return bits, Hest_start, Hest_end
+        return bits, Hest_start[0], Hest_end[0]
         
             
             
@@ -576,13 +613,13 @@ class channel(receiver):
         # Measure channel response
         H_all = data / constellation
         
-        H = np.zeros(len(self.data_carriers),dtype=complex)
+        H = np.zeros(len(self.carriers),dtype=complex)
         
-        for i in range(0,len(self.data_carriers)):
+        for i in range(0,len(self.carriers)):
             H.real[i] = np.mean(H_all[:,i].real)
             H.imag[i] = np.mean(H_all[:,i].imag)
         
-        plt.plot(self.data_carriers / self.ofdm_symbol_size * self.fs, H.real, label='Measured channel')
+        plt.plot(self.carriers / self.ofdm_symbol_size * self.fs, H.real, label='Measured channel')
         plt.ylabel("|H(f)|")
         plt.xlabel("Frequency")
         plt.title("Channel Frequency Response")
@@ -603,9 +640,19 @@ class channel(receiver):
         
         return H, h
 
+
+# Load input file
+def load_file(file_name):
+    data_bytes = np.fromfile(file_name,dtype=np.uint8)
+    file_info = file_name + "\x00" + str(len(data_bytes)) + "\x00"
+    b = bytearray()
+    b.extend(map(ord, file_info))
+    return np.unpackbits(np.hstack([b,data_bytes]))
+    
+
+
 # Save the output file using specified name and file size detecting null terminated string
 def save_file(rx_bits):
-
     file_name = []
     file_size = []
     data = np.packbits(rx_bits)
@@ -630,7 +677,7 @@ def save_file(rx_bits):
     file_size = "".join([chr(item) for item in file_size])
 
     print("File Name: " + file_name + "\nFile Size: " + file_size + " bytes")
-
+    
     data = data[:int(file_size)]
-        
+    data.tofile(file_name[:-4] + "_received" + file_name[-4:])
     return file_name, data
