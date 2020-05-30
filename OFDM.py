@@ -287,7 +287,7 @@ class transmitter(CamG):                                # Inherits class attribu
             plt.savefig("OFDM Frame")
             plt.show()
             
-        return signal, sync_valid, known_valid, payload_valid
+        return signal
         
         
         
@@ -409,7 +409,7 @@ class receiver(transmitter):
                 Hest_start[i] = Hest_start[i] / known_symbols
                 Hest_end[i] = Hest_end[i] / known_symbols
             
-            Hest_mag = abs(Hest_start)
+            Hest_mag = abs(Hest_end)
             phase0 = np.angle(Hest_start)                  # Phase at start
             phase1 = np.angle(Hest_end)                    # Phase at end
             
@@ -423,21 +423,14 @@ class receiver(transmitter):
             for i in range(self.no_packets):                                          # Iterate over packets
                 for l in range(self.packet_length):                                   # Iterate over symbols in packet
                     for n in range(self.K):
-                        # Equalise magnitude using initial hest and phase using linear phase interpolation
-                        Hest[i,l,n] = Hest_start[i,n] * np.exp(1j * (p[i]*n*(l + self.no_pilots/2) / (self.packet_length)))
+                        # Correct magnitude
+                        Hest[i,l,n] = abs(Hest_start[i,n]) + (abs(Hest_end[i,n]) - abs(Hest_start[i,n])) * (l + self.no_pilots/2) / (self.packet_length + self.no_pilots)
+                        # Correct phase
+                        Hest[i,l,n] = Hest[i,l,n] * np.exp(1j * (np.angle(Hest_start[i,n]) + p[i]*n*(l + self.no_pilots/2) / (self.packet_length + self.no_pilots)))
                         data_eq[i,l,n] = data_symbols[i,l,n] / Hest[i,l,n]
             
-            x = np.linspace(0,self.fs*self.K/self.ofdm_symbol_size,self.K)
-            for i in np.arange(self.packet_length)[::10]:
-                plt.plot(x,np.unwrap(np.angle(Hest[0,i,:])))
-            plt.plot(x,np.unwrap(np.angle(Hest_end[0,:])), color="blue", label="Phase at End of Packet")
-            plt.plot(x,np.unwrap(np.angle(Hest_start[0,:])), color="red",label="Phase at Start of Packet")
-            plt.legend()
-            plt.xlabel("Frequency")
-            plt.ylabel("Phase Shift")
-            plt.show()
             
-        return data_eq.reshape(-1,self.K), Hest_start, Hest_end
+        return data_eq.reshape(-1,self.K), Hest_start, Hest_end, Hest
     
     
     # De-map the constellation symbol to bits using min distance
@@ -468,18 +461,20 @@ class receiver(transmitter):
     # Print symbol mapping
     
     # Print graphs
-    def graphs(self, Hest):
+    def channel_response(self, Hest):
         
         plt.plot(self.carriers / self.ofdm_symbol_size * self.fs, abs(Hest[0]), label='Estimated channel')
         plt.ylabel("|H(f)|")
         plt.xlabel("Frequency")
         plt.title("Channel Frequency Response Estimate")
+        plt.savefig("plots/Channel_mag")
         plt.show()
         
         plt.plot(self.carriers / self.ofdm_symbol_size * self.fs, np.angle(Hest[0]), label='Estimated channel')
         plt.ylabel("arg(H(f))")
         plt.xlabel("Frequency")
         plt.title("Channel Frequency Response Estimate")
+        plt.savefig("plots/Channel_freq")
         plt.show()
         
         
@@ -489,6 +484,7 @@ class receiver(transmitter):
         plt.title("Channel Impulse Response")
         plt.ylabel("h")
         plt.xlabel("time (samples)")
+        plt.savefig("plots/Channel_inpulse")
         plt.show()
         
         
@@ -513,7 +509,7 @@ class receiver(transmitter):
         
         print("Number of received OFDM symbols:    " + str(self.no_packets * self.packet_length))
         
-        data_symbols, Hest_start, Hest_end = self.equalise(data_symbols, start_pilots, end_pilots)
+        data_symbols, Hest_start, Hest_end, Hest = self.equalise(data_symbols, start_pilots, end_pilots)
         
         
         # Extract data symbols and throw away unused carriers: data_carriers -1 as 0 frequency already removed
@@ -526,17 +522,48 @@ class receiver(transmitter):
         print("Number of received bits:            " + str(len(bits)))
         
         if(graph_output == True):
+            
+            x = np.linspace(0,self.fs*self.K/self.ofdm_symbol_size,self.K)
+            for i in np.arange(self.packet_length)[::10]:
+                plt.plot(x,np.unwrap(np.angle(Hest[0,i,:])))
+            plt.plot(x,np.unwrap(np.angle(Hest_end[0,:])), color="blue", label="Phase at End of Packet")
+            plt.plot(x,np.unwrap(np.angle(Hest_start[0,:])), color="red",label="Phase at Start of Packet")
+            plt.legend()
+            plt.xlabel("Frequency")
+            plt.ylabel("Phase Shift")
+            plt.savefig("plots/Frequency_drift")
+            plt.show()
+        
+            fig = plt.figure()
+            ax = fig.add_subplot(1, 1, 1)
+
+            #spine placement data centered
+            ax.spines['left'].set_position('center')
+            ax.spines['bottom'].set_position('center')
+            ax.spines['right'].set_color('none')
+            ax.spines['top'].set_color('none')
+            
             #for i in range(2):
             for j in range(1400):
                 plt.plot(data_symbols[0,j].real, data_symbols[0,j].imag, 'bo')
                 plt.plot(data_symbols[179,j].real, data_symbols[179,j].imag, 'go')
+            
+            plt.plot(data_symbols[0,0].real, data_symbols[0,0].imag, 'bo', label="Constellation of 1st symbol in packet")
+            plt.plot(data_symbols[179,0].real, data_symbols[179,0].imag, 'go', label="Constellation of last symbol in packet")
+            
             for b1 in [0, 1]:
                 for b0 in [0, 1]:
                     B = (b1, b0)
                     Q = self.mapping_table[B]
                     plt.plot(Q.real, Q.imag, 'ro')
+                    
+            Q = self.mapping_table[(0,0)]
+            plt.plot(Q.real, Q.imag, 'ro', label="Constellation Points")
+            
             plt.xlim(-5,5)
             plt.ylim(-5,5)
+            plt.legend()
+            plt.savefig("plots/constellation")
             plt.show()
         
         
