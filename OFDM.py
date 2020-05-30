@@ -416,7 +416,7 @@ class receiver(transmitter):
             phase_diff = np.unwrap(phase1) - np.unwrap(phase0)                   # Phase difference
             p = np.zeros(self.no_packets)                                        # Initialise array for gradient of phase difference at each packet
             for i in range(self.no_packets):
-                p[i] = np.polyfit(np.arange(len(phase_diff[i,100:1500])),phase_diff[i,100:1500],1)[0]
+                p[i] = np.polyfit(np.arange(len(phase_diff[i,300:1200])),phase_diff[i,300:1200],1)[0]
                 
 
             # Equalise data carriers from measurements
@@ -427,6 +427,7 @@ class receiver(transmitter):
                         Hest[i,l,n] = abs(Hest_start[i,n]) + (abs(Hest_end[i,n]) - abs(Hest_start[i,n])) * (l + self.no_pilots/2) / (self.packet_length + self.no_pilots)
                         # Correct phase
                         Hest[i,l,n] = Hest[i,l,n] * np.exp(1j * (np.angle(Hest_start[i,n]) + p[i]*n*(l + self.no_pilots/2) / (self.packet_length + self.no_pilots)))
+                        #Hest[i,l,n] = Hest[i,l,n] * np.exp(1j * (np.angle(Hest_start[i,n]) + phase_diff[i,n]*(l + self.no_pilots/2) / (self.packet_length + self.no_pilots)))
                         data_eq[i,l,n] = data_symbols[i,l,n] / Hest[i,l,n]
             
             
@@ -463,14 +464,14 @@ class receiver(transmitter):
     # Print graphs
     def channel_response(self, Hest):
         
-        plt.plot(self.carriers / self.ofdm_symbol_size * self.fs, abs(Hest[0]), label='Estimated channel')
+        plt.plot(self.carriers / self.ofdm_symbol_size * self.fs, abs(Hest), label='Estimated channel')
         plt.ylabel("|H(f)|")
         plt.xlabel("Frequency")
         plt.title("Channel Frequency Response Estimate")
         plt.savefig("plots/Channel_mag")
         plt.show()
         
-        plt.plot(self.carriers / self.ofdm_symbol_size * self.fs, np.angle(Hest[0]), label='Estimated channel')
+        plt.plot(self.carriers / self.ofdm_symbol_size * self.fs, np.angle(Hest), label='Estimated channel')
         plt.ylabel("arg(H(f))")
         plt.xlabel("Frequency")
         plt.title("Channel Frequency Response Estimate")
@@ -478,9 +479,9 @@ class receiver(transmitter):
         plt.show()
         
         
-        h = np.fft.ifft(Hest[0])
+        h = np.fft.ifft(Hest)
         time = np.linspace(0,(len(h)), len(h))
-        plt.plot(time[:100],h.real[:100])
+        plt.plot(time[:500],h.real[:500])
         plt.title("Channel Impulse Response")
         plt.ylabel("h")
         plt.xlabel("time (samples)")
