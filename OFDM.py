@@ -8,6 +8,7 @@ import sounddevice as sd
 import pandas as pd
 sd.default.channels = 1
 from IPython.display import Audio
+import pyldpc
 
 
 #########################################
@@ -15,28 +16,42 @@ from IPython.display import Audio
 #########################################
 
 class CamG:
-    def __init__(self, mode, no_pilots=10, packet_length=180, bin_mode=1):
-    
+    def __init__(self, mode, encoding="None", no_pilots=20, packet_length=180):
+        
+        # LDPC params
+        self.encoding = encoding  # Encoding type LDPC (broken), XOR, or None
+        
         # Audio params
         self.fs = 48000                                                             # Audio sampling rate
     
         # OFDM params
         self.ofdm_symbol_size = 4096                                                # OFDM symbol size
-        
-        bin_modes = [(0,self.ofdm_symbol_size // 2 - 1),(100,1500)]
-        self.lowest_bin = bin_modes[bin_mode][0]                                    # Set lowest active freq bin
-        self.highest_bin = bin_modes[bin_mode][1]                                   # Set highest active freq bin
         self.K = self.ofdm_symbol_size // 2 - 1                                     # Number of carriers in OFDM symbol i.e. DFT size / 2 - 1
+        
+        modes = {
+            "A1" : (224,(0,self.K)),
+            "A2" : (224,(100,1500)),
+            "A3" : (224,(100,1000)),
+            "B1" : (704,(0,self.K)),
+            "B2" : (704,(100,1500)),
+            "B3" : (704,(100,1000)),
+            "C1" : (1184,(0,self.K)),
+            "C2" : (1184,(100,1500)),
+            "C3" : (1184,(100,1000))
+            }
+
+        self.cp_length = modes[mode][0]                                             # length of cyclic prefix based on mode
+        self.lowest_bin = modes[mode][1][0]                                         # Set lowest active freq bin
+        self.highest_bin = modes[mode][1][1]                                        # Set highest active freq bin
+
         self.carriers = np.arange(1,self.K+1)                                       # indicies of subcarriers [1... K+1]
         self.data_carriers = np.arange(self.lowest_bin,self.highest_bin)            # Pick out data carriers
         self.data_carriers_per_symbol = len(self.data_carriers)                     # Number of turned on data carriers per OFDM symbol
         self.unused_carriers = np.delete(self.carriers, (self.data_carriers-1))     # Unused carriers
         self.packet_length = packet_length                                          # Number of OFDM data symbols in a packet
         self.no_pilots = no_pilots                                                  # Number of pilot symbols preceeding and following data
-        self.known_sequence = np.array([])                                        # Known values of the pilot symbols to transmit before data
+        self.known_sequence = np.array([],dtype=np.uint8)                           # Known values of the pilot symbols to transmit before data
         
-        cp_modes = [224, 704, 1184]
-        self.cp_length = cp_modes[mode-1]                                           # length of cyclic prefix based on mode
  
         # Sync params
         self.sync_method = "chirp"                                                  # Synchronisation method
@@ -49,7 +64,7 @@ class CamG:
         self.f1 = 8000                                                  # Chirp finish frequency
         self.chirp_length = 5*(self.ofdm_symbol_size + self.cp_length)  # Chirp time
 
-
+        
 
         # Modulation params
         self.modulation = "QPSK"                # Modulation method
@@ -108,6 +123,70 @@ class CamG:
     #########################################
     
 class transmitter(CamG):                                # Inherits class attributes from CamG
+
+    # LDPC encoding
+    def encode(self, bits):
+        
+        
+        n = self.data_bits_per_symbol // 50     # Set n at symbol bit length / 50 = 28
+        d_c = 7                                 # Set number of 1's in coded bits to be half
+        d_v = 5
+
+        ldpcSeed = 42
+            
+        if self.encoding == "LDPC":
+            H, G = pyldpc.make_ldpc(n, d_v, d_c, systematic = True, sparse = True)
+            
+            # Get k and the number of unencoded bits per packet so we can shape and pad the input bits
+            k = G.shape[1]
+            unencoded_bits_per_packet = 50 * k * self.packet_length
+            
+            # Pad bits to correct length
+            padding_length = int((unencoded_bits_per_packet - (len(bits) % unencoded_bits_per_packet)) % unencoded_bits_per_packet)
+            
+            padding = np.random.binomial(n=1, p=0.5, size=(padding_length,))
+            
+            # Reshape to packets length k for coding
+            padded_bits = np.reshape(np.hstack([bits,padding]), (k, -1))
+            
+            signal_coded = pyldpc.encode(G, padded_bits, snr = 10, seed = ldpcSeed)
+            
+            # Reshape back into serial array
+            signal_coded = signal_coded.reshape(-1)
+            
+            # LDPC gives -1's and 1's, switch -1's to binary
+            bits_encoded = np.where(signal_coded <= 0, 0, signal_coded)
+            bits_encoded = np.where(bits_encoded > 0, 1, bits_encoded)
+        
+        
+        # XOR with known data and pad
+        elif(self.encoding == "XOR"):
+            known_bits = np.tile(self.known_sequence[:self.data_bits_per_symbol], int(np.ceil(len(bits)/self.data_bits_per_symbol)))
+            known_bits = known_bits[:len(bits)]
+            bits = np.bitwise_xor(bits, known_bits)
+            
+            bits_per_packet = self.data_bits_per_symbol * self.packet_length
+            padding_length = (bits_per_packet - len(bits) % bits_per_packet) % bits_per_packet
+                
+            # Pad with random data - packing with zeros is bad
+            padding = np.random.binomial(n=1, p=0.5, size=(padding_length,))
+            bits_encoded = np.hstack([bits,padding])
+        
+        
+        # Else just pad the bits to correct length
+        else:
+            bits_per_packet = self.data_bits_per_symbol * self.packet_length
+            
+            padding_length = (bits_per_packet - len(bits) % bits_per_packet) % bits_per_packet
+                
+            # Pad with random data - packing with zeros is bad
+            padding = np.random.binomial(n=1, p=0.5, size=(padding_length,))
+            
+            bits_encoded = np.hstack([bits,padding])
+
+        return bits_encoded
+        
+        
 
     # Pad bits with zeros to right length for symbols and packets
     def pad(self,bits):
@@ -173,8 +252,6 @@ class transmitter(CamG):                                # Inherits class attribu
         return p.reshape(-1, self.K)
 
 
-    
-    
     # Prepare data for stream
     def send_to_stream(self, time_data, sync):
         
@@ -185,43 +262,25 @@ class transmitter(CamG):                                # Inherits class attribu
         known_time = self.add_cp(np.fft.ifft(known_ofdm))                               # Convert to time domain and add CP
         
         
+        packets = time_data.reshape(-1, self.packet_length, self.ofdm_symbol_size+self.cp_length) # Reshape data into packets
+        self.no_packets = packets.shape[0]                                          # Get number of packets in stream
+        known_time = np.tile(known_time, (self.no_packets,self.no_pilots,1))        # Tile known data across number of pilot symbols and packets
+            
+        sync = np.tile(sync, (self.no_packets,1))                                   # Tile sync across packets
+        tx_data = 2 * np.hstack([known_time, packets, known_time])                      # Add known data to start and end of each packet x2 for volume
+        tx_data = np.hstack([sync, tx_data.reshape(self.no_packets,-1)])                 # Add sync to each packet
+        tx = tx_data.reshape(-1).real                                               # Shape to serial
+        tx = np.hstack([tx,sync[0]])                                                # Add a chirp at the very end
         
-        # No packets
-        if(self.packet_length == -1):
-            known_time = np.tile(known_time, (self.no_pilots,1))                        # Tile known data across number of pilot symbols
-            tx_data = np.hstack([known_time, time_data, known_time])                                # Add known data to start and end
-            tx = np.hstack([sync, tx_data.reshape(-1)]).real                            # Make serial and add sync
-            
-            # Create frames for visuals
-            sync_valid = np.zeros(len(tx)); known_valid = np.zeros(len(tx)); payload_valid = np.zeros(len(tx))
-            sync_valid[0:len(sync)] = 1
-            for f in range(self.no_pilots):
-                known_valid[len(sync) + (self.cp_length + self.ofdm_symbol_size) * f + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
-            for f in range(time_data.shape[0]):
-                payload_valid[len(sync) + (self.cp_length + self.ofdm_symbol_size) * (self.no_pilots + f) + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
-            self.no_packets = 1
-            
-
-        # Packets
-        else:
-            packets = time_data.reshape(-1, self.packet_length, self.ofdm_symbol_size+self.cp_length) # Reshape data into packets
-            self.no_packets = packets.shape[0]                                          # Get number of packets in stream
-            known_time = np.tile(known_time, (self.no_packets,self.no_pilots,1))        # Tile known data across number of pilot symbols and packets
-            
-            sync = np.tile(sync, (self.no_packets,1))                                   # Tile sync across packets
-            tx_data = np.hstack([known_time, packets, known_time])                      # Add known data to start and end of each packet
-            tx_data = np.hstack([sync, tx_data.reshape(self.no_packets,-1)])                 # Add sync to each packet
-            tx = tx_data.reshape(-1).real                                               # Shape to serial
-            
-            # Create frames for visuals
-            frame_length = tx_data.shape[1]
-            sync_valid = np.zeros(frame_length); known_valid = np.zeros(frame_length); payload_valid = np.zeros(frame_length)
-            sync_valid[0:sync.shape[1]] = 1
-            for f in np.hstack([np.arange(self.no_pilots),np.arange(self.no_pilots+self.packet_length,2*self.no_pilots+self.packet_length)]):
-                known_valid[sync.shape[1] + (self.cp_length + self.ofdm_symbol_size) * f * 1 + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
-            for f in range(self.packet_length):
-                payload_valid[sync.shape[1] + (self.cp_length + self.ofdm_symbol_size) * (self.no_pilots + f) + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
-            sync_valid = np.tile(sync_valid,self.no_packets); known_valid = np.tile(known_valid, self.no_packets); payload_valid = np.tile(payload_valid, self.no_packets)
+        # Create frames for visuals
+        frame_length = tx_data.shape[1]
+        sync_valid = np.zeros(frame_length); known_valid = np.zeros(frame_length); payload_valid = np.zeros(frame_length)
+        sync_valid[0:sync.shape[1]] = 1
+        for f in np.hstack([np.arange(self.no_pilots),np.arange(self.no_pilots+self.packet_length,2*self.no_pilots+self.packet_length)]):
+            known_valid[sync.shape[1] + (self.cp_length + self.ofdm_symbol_size) * f * 1 + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
+        for f in range(self.packet_length):
+            payload_valid[sync.shape[1] + (self.cp_length + self.ofdm_symbol_size) * (self.no_pilots + f) + self.cp_length + np.arange(self.ofdm_symbol_size)] = 1
+        sync_valid = np.tile(sync_valid,self.no_packets); known_valid = np.tile(known_valid, self.no_packets); payload_valid = np.tile(payload_valid, self.no_packets)
     
         return tx, sync_valid, known_valid, payload_valid
     
@@ -251,10 +310,10 @@ class transmitter(CamG):                                # Inherits class attribu
         print("OFDM Paramters:")
         print(self)
         
-        bits_padded = self.pad(bits)
+        bits_encoded = self.encode(bits)
     
         
-        bits_parallel = self.SP(bits_padded)
+        bits_parallel = self.SP(bits_encoded)
         constellation = self.map(bits_parallel)
         
         OFDM_symbols = self.build_OFDM_symbol(constellation)
@@ -311,7 +370,7 @@ class receiver(transmitter):
             if(zeros[i] == 1):
                 for j in range(self.chirp_length):
                     zeros[i+1+j] = 0
-        # Shift forward by two for start of signal
+
         return zeros
         
         
@@ -336,6 +395,9 @@ class receiver(transmitter):
         
         # Get indicies of sync pulses
         zero_indicies = np.where(zeros == True)[0] + 2                  # Shift by two to get actual start of data
+        
+        # Get rid of the terminating chirp since we're not using it
+        zero_indicies = zero_indicies[:-1]
         
         #######
         if(self.packet_length == -1):
@@ -458,8 +520,49 @@ class receiver(transmitter):
     def PS(self, bits):
         return bits.reshape((-1,))
 
-    # Print channel estimation
-    # Print symbol mapping
+    # Decoding
+    def decode(self, bits_encoded):
+        if(self.encoding == "LDPC"):
+            n = self.data_bits_per_symbol // 50           # Set n at symbol bit length / 50 = 28
+            
+            
+            # Set d_c and d_v
+            d_c = 7
+            d_v = 5
+            
+            # Set LDPC seed
+            ldpcSeed = 42
+                
+            H, G = pyldpc.make_ldpc(n, d_v, d_c, seed = ldpcSeed, systematic = True, sparse = True)
+            k = G.shape[1]
+            
+            # pyldpc uses -1 and 1, not binary
+            signal_encoded = np.where(bits_encoded == 0, -1, bits_encoded)
+            
+            # Shape into blocks for decoding
+            signal_encoded = signal_encoded.reshape(n,-1)
+            
+            # Decode
+            D = np.zeros(signal_encoded.shape)
+            decoded_bits = np.zeros((k,signal_encoded.shape[1]))
+            
+            for i in range(signal_encoded.shape[1]):
+                D[:, i] = pyldpc.decode(H, signal_encoded[:, i], snr = 10, maxiter = 10)
+                decoded_bits[:, i] = np.around(pyldpc.get_message(G, D[:, i]))
+            
+            decoded_bits = decoded_bits.reshape(-1)
+            print(decoded_bits)
+            
+        elif(self.encoding == "XOR"):
+            known_bits = np.tile(self.known_sequence[:self.data_bits_per_symbol], int(np.ceil(len(bits_encoded)/self.data_bits_per_symbol)))
+            known_bits = known_bits[:len(bits_encoded)]
+            decoded_bits = np.bitwise_xor(bits_encoded, known_bits)
+            
+        else:
+            pass
+        
+        return decoded_bits
+    
     
     # Print graphs
     def channel_response(self, Hest):
@@ -519,6 +622,8 @@ class receiver(transmitter):
         bits_parallel, hardDecision = self.demap(data_symbols)
 
         bits = self.PS(bits_parallel)
+        
+        bits = self.decode(bits)
         
         print("Number of received bits:            " + str(len(bits)))
         
@@ -671,7 +776,7 @@ class channel(receiver):
 
 # Load input file
 def load_file(file_name):
-    data_bytes = np.fromfile(file_name,dtype=np.uint8)
+    data_bytes = np.fromfile("input_files/" + file_name,dtype=np.uint8)
     file_info = file_name + "\x00" + str(len(data_bytes)) + "\x00"
     b = bytearray()
     b.extend(map(ord, file_info))
@@ -707,5 +812,5 @@ def save_file(rx_bits):
     print("File Name: " + file_name + "\nFile Size: " + file_size + " bytes")
     
     data = data[:int(file_size)]
-    data.tofile(file_name[:-4] + "_received" + file_name[-4:])
+    data.tofile("output_files/" + file_name[:-4] + "_received" + file_name[-4:])
     return file_name, data
