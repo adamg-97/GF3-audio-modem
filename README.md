@@ -7,3 +7,5 @@ Harriet Crisp
 Hugo Sonnery
 
 Adam Goldney
+
+Main code is contained within OFDM.py and functions are executed in the Final System Test Jupyter Notebook
